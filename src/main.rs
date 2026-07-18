@@ -1,5 +1,7 @@
 use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
 
+pub mod terminal;
+
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     Run { path: Option<PathBuf> },
