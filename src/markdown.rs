@@ -1,6 +1,6 @@
 use pulldown_cmark::{
-    CodeBlockKind, Event, HeadingLevel as ParserHeadingLevel, LinkType, Options, Parser, Tag,
-    TagEnd,
+    Alignment, CodeBlockKind, Event, HeadingLevel as ParserHeadingLevel, LinkType, Options, Parser,
+    Tag, TagEnd,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -22,8 +22,8 @@ pub fn parse(source: &str) -> Document {
     let mut blocks = Vec::new();
     let mut active_block = None;
     let mut code_block = None;
-    let mut list = None;
-    let mut quote_blocks = None;
+    let mut lists = Vec::new();
+    let mut quote_blocks = Vec::new();
     let mut table = None;
     let mut inline_spans = Vec::new();
 
@@ -92,7 +92,9 @@ pub fn parse(source: &str) -> Document {
                     span.wrap(content);
                 }
             }
-            Event::Start(Tag::Table(_)) => table = Some(TableContext::default()),
+            Event::Start(Tag::Table(alignments)) => {
+                table = Some(TableContext::new(alignments));
+            }
             Event::Start(Tag::TableHead) => {
                 if let Some(table) = &mut table {
                     table.in_header = true;
@@ -138,10 +140,16 @@ pub fn parse(source: &str) -> Document {
             }
             Event::End(TagEnd::Table) => {
                 if let Some(table) = table.take() {
-                    blocks.push(Block::Table {
-                        header: table.header,
-                        rows: table.rows,
-                    });
+                    push_block(
+                        &mut blocks,
+                        &mut lists,
+                        &mut quote_blocks,
+                        Block::Table {
+                            header: table.header,
+                            rows: table.rows,
+                            alignments: table.alignments,
+                        },
+                    );
                 }
             }
             Event::Start(Tag::Heading { level, .. }) => {
@@ -154,7 +162,7 @@ pub fn parse(source: &str) -> Document {
                 if let Some(ActiveBlock::Heading { level, content }) = active_block.take() {
                     push_block(
                         &mut blocks,
-                        &mut list,
+                        &mut lists,
                         &mut quote_blocks,
                         Block::Heading { level, content },
                     );
@@ -167,7 +175,7 @@ pub fn parse(source: &str) -> Document {
                 if let Some(ActiveBlock::Paragraph(content)) = active_block.take() {
                     push_block(
                         &mut blocks,
-                        &mut list,
+                        &mut lists,
                         &mut quote_blocks,
                         Block::Paragraph(content),
                     );
@@ -175,48 +183,77 @@ pub fn parse(source: &str) -> Document {
             }
             Event::Rule => push_block(
                 &mut blocks,
-                &mut list,
+                &mut lists,
                 &mut quote_blocks,
                 Block::ThematicBreak,
             ),
-            Event::Start(Tag::List(start)) => list = Some(ListContext::new(start.is_some())),
+            Event::Start(Tag::List(start)) => {
+                flush_active_block(
+                    &mut active_block,
+                    &mut blocks,
+                    &mut lists,
+                    &mut quote_blocks,
+                );
+                lists.push(ListContext::new(start));
+            }
             Event::Start(Tag::Item) => {
-                if let Some(list) = &mut list {
+                if let Some(list) = lists.last_mut() {
                     list.current = Some(ListItem {
                         task: None,
                         blocks: Vec::new(),
                     });
+                    // pulldown-cmark omits paragraph events for tight list items.
+                    active_block = Some(ActiveBlock::Paragraph(Vec::new()));
                 }
             }
             Event::TaskListMarker(checked) => {
-                if let Some(Some(item)) = list.as_mut().map(|list| list.current.as_mut()) {
+                if let Some(Some(item)) = lists.last_mut().map(|list| list.current.as_mut()) {
                     item.task = Some(checked);
                 }
             }
             Event::End(TagEnd::Item) => {
-                if let Some(list) = &mut list
+                if let Some(ActiveBlock::Paragraph(content)) = active_block.take()
+                    && let Some(Some(item)) = lists.last_mut().map(|list| list.current.as_mut())
+                    && !content.is_empty()
+                {
+                    item.blocks.push(Block::Paragraph(content));
+                }
+                if let Some(list) = lists.last_mut()
                     && let Some(item) = list.current.take()
                 {
                     list.items.push(item);
                 }
             }
             Event::End(TagEnd::List(_)) => {
-                if let Some(list) = list.take() {
+                if let Some(list) = lists.pop() {
                     push_block(
                         &mut blocks,
-                        &mut None,
+                        &mut lists,
                         &mut quote_blocks,
                         Block::List {
-                            ordered: list.ordered,
+                            start: list.start,
                             items: list.items,
                         },
                     );
                 }
             }
-            Event::Start(Tag::BlockQuote(_)) => quote_blocks = Some(Vec::new()),
+            Event::Start(Tag::BlockQuote(_)) => {
+                flush_active_block(
+                    &mut active_block,
+                    &mut blocks,
+                    &mut lists,
+                    &mut quote_blocks,
+                );
+                quote_blocks.push(Vec::new());
+            }
             Event::End(TagEnd::BlockQuote(_)) => {
-                if let Some(quoted) = quote_blocks.take() {
-                    blocks.push(Block::BlockQuote(quoted));
+                if let Some(quoted) = quote_blocks.pop() {
+                    push_block(
+                        &mut blocks,
+                        &mut lists,
+                        &mut quote_blocks,
+                        Block::BlockQuote(quoted),
+                    );
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -232,7 +269,7 @@ pub fn parse(source: &str) -> Document {
                 if let Some((language, content)) = code_block.take() {
                     push_block(
                         &mut blocks,
-                        &mut list,
+                        &mut lists,
                         &mut quote_blocks,
                         Block::CodeBlock { language, content },
                     );
@@ -256,6 +293,15 @@ pub fn parse(source: &str) -> Document {
             }
             Event::SoftBreak => push_inline(&mut active_block, Inline::SoftBreak),
             Event::HardBreak => push_inline(&mut active_block, Inline::HardBreak),
+            Event::Html(html) => push_block(
+                &mut blocks,
+                &mut lists,
+                &mut quote_blocks,
+                Block::Html(html.into_string()),
+            ),
+            Event::InlineHtml(html) => {
+                push_inline(&mut active_block, Inline::Html(html.into_string()))
+            }
             _ => {}
         }
     }
@@ -264,14 +310,14 @@ pub fn parse(source: &str) -> Document {
 }
 
 struct ListContext {
-    ordered: bool,
+    start: Option<u64>,
     items: Vec<ListItem>,
     current: Option<ListItem>,
 }
 impl ListContext {
-    fn new(ordered: bool) -> Self {
+    fn new(start: Option<u64>) -> Self {
         Self {
-            ordered,
+            start,
             items: Vec::new(),
             current: None,
         }
@@ -280,16 +326,33 @@ impl ListContext {
 
 fn push_block(
     blocks: &mut Vec<Block>,
-    list: &mut Option<ListContext>,
-    quote: &mut Option<Vec<Block>>,
+    lists: &mut [ListContext],
+    quotes: &mut [Vec<Block>],
     block: Block,
 ) {
-    if let Some(Some(item)) = list.as_mut().map(|list| list.current.as_mut()) {
-        item.blocks.push(block);
-    } else if let Some(quoted) = quote {
+    if let Some(quoted) = quotes.last_mut() {
         quoted.push(block);
+    } else if let Some(Some(item)) = lists.last_mut().map(|list| list.current.as_mut()) {
+        item.blocks.push(block);
     } else {
         blocks.push(block);
+    }
+}
+
+fn flush_active_block(
+    active_block: &mut Option<ActiveBlock>,
+    blocks: &mut Vec<Block>,
+    lists: &mut [ListContext],
+    quotes: &mut [Vec<Block>],
+) {
+    match active_block.take() {
+        Some(ActiveBlock::Heading { level, content }) => {
+            push_block(blocks, lists, quotes, Block::Heading { level, content });
+        }
+        Some(ActiveBlock::Paragraph(content)) if !content.is_empty() => {
+            push_block(blocks, lists, quotes, Block::Paragraph(content));
+        }
+        Some(ActiveBlock::Paragraph(_)) | None => {}
     }
 }
 
@@ -357,13 +420,26 @@ fn active_content<'a>(
     }
 }
 
-#[derive(Default)]
 struct TableContext {
+    alignments: Vec<TableAlignment>,
     header: Vec<Vec<Inline>>,
     rows: Vec<Vec<Vec<Inline>>>,
     current_row: Option<Vec<Vec<Inline>>>,
     current_cell: Option<Vec<Inline>>,
     in_header: bool,
+}
+
+impl TableContext {
+    fn new(alignments: Vec<Alignment>) -> Self {
+        Self {
+            alignments: alignments.into_iter().map(TableAlignment::from).collect(),
+            header: Vec::new(),
+            rows: Vec::new(),
+            current_row: None,
+            current_cell: None,
+            in_header: false,
+        }
+    }
 }
 
 enum ActiveBlock {
@@ -402,7 +478,7 @@ pub enum Block {
     },
     Paragraph(Vec<Inline>),
     List {
-        ordered: bool,
+        start: Option<u64>,
         items: Vec<ListItem>,
     },
     BlockQuote(Vec<Block>),
@@ -413,8 +489,10 @@ pub enum Block {
     Table {
         header: Vec<Vec<Inline>>,
         rows: Vec<Vec<Vec<Inline>>>,
+        alignments: Vec<TableAlignment>,
     },
     ThematicBreak,
+    Html(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -425,6 +503,25 @@ pub enum HeadingLevel {
     Four,
     Five,
     Six,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableAlignment {
+    None,
+    Left,
+    Center,
+    Right,
+}
+
+impl From<Alignment> for TableAlignment {
+    fn from(value: Alignment) -> Self {
+        match value {
+            Alignment::None => Self::None,
+            Alignment::Left => Self::Left,
+            Alignment::Center => Self::Center,
+            Alignment::Right => Self::Right,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -451,11 +548,12 @@ pub enum Inline {
     Autolink(String),
     SoftBreak,
     HardBreak,
+    Html(String),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, Document, HeadingLevel, Inline, ListItem, parse};
+    use super::{Block, Document, HeadingLevel, Inline, ListItem, TableAlignment, parse};
 
     #[test]
     fn parses_headings_and_paragraphs() {
@@ -494,6 +592,18 @@ mod tests {
     }
 
     #[test]
+    fn preserves_nested_lists_and_blockquotes() {
+        let document = parse("- parent\n  - child\n- sibling\n\n> outer\n> > inner");
+
+        assert!(matches!(&document.blocks()[0], Block::List { items, .. }
+            if items.len() == 2
+                && matches!(items[0].blocks.as_slice(), [Block::Paragraph(_), Block::List { items, .. }] if items.len() == 1)
+                && matches!(items[1].blocks.as_slice(), [Block::Paragraph(_)])));
+        assert!(matches!(&document.blocks()[1], Block::BlockQuote(blocks)
+            if matches!(blocks.as_slice(), [Block::Paragraph(_), Block::BlockQuote(_)])));
+    }
+
+    #[test]
     fn parses_links_and_images() {
         let document = parse("[DocSail](https://example.invalid) ![Logo](logo.png)");
         assert!(
@@ -505,7 +615,7 @@ mod tests {
     fn parses_gfm_tables() {
         let document = parse("| Name | Value |\n| --- | --- |\n| DocSail | TUI |");
         assert!(
-            matches!(&document.blocks()[0], Block::Table { header, rows } if header.len() == 2 && rows.len() == 1)
+            matches!(&document.blocks()[0], Block::Table { header, rows, alignments } if header.len() == 2 && rows.len() == 1 && alignments == &[TableAlignment::None, TableAlignment::None])
         );
     }
 
@@ -539,7 +649,7 @@ mod tests {
                 content: vec![Inline::Text("DocSail".to_owned())],
             },
             Block::List {
-                ordered: false,
+                start: None,
                 items: vec![ListItem {
                     task: Some(true),
                     blocks: vec![Block::Paragraph(vec![Inline::Strikethrough(vec![
