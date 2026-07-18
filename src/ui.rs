@@ -28,14 +28,15 @@ pub fn render(
     frame: &mut Frame<'_>,
     tree: &FileTree,
     selected_file_index: usize,
+    preview_scroll: usize,
     document: &Document,
 ) {
     let layout = two_pane_layout(frame.area());
     render_file_tree(frame, layout.file_tree, tree, selected_file_index);
-    render_preview(frame, layout.preview, document);
+    render_preview(frame, layout.preview, preview_scroll, document);
 }
 
-fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
+fn render_preview(frame: &mut Frame<'_>, area: Rect, preview_scroll: usize, document: &Document) {
     let lines = document
         .blocks()
         .iter()
@@ -49,9 +50,15 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Preview")),
+        Paragraph::new(lines)
+            .scroll((preview_scroll_offset(preview_scroll), 0))
+            .block(Block::default().borders(Borders::ALL).title("Preview")),
         area,
     );
+}
+
+fn preview_scroll_offset(scroll: usize) -> u16 {
+    u16::try_from(scroll).unwrap_or(u16::MAX)
 }
 
 fn heading_marker(level: HeadingLevel) -> &'static str {
@@ -156,7 +163,7 @@ fn append_tree_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{file_tree_rows, two_pane_layout};
+    use super::{file_tree_rows, preview_scroll_offset, two_pane_layout};
     use crate::workspace::FileTree;
     use ratatui::layout::Rect;
     use std::path::PathBuf;
@@ -197,5 +204,11 @@ mod tests {
         assert_eq!(rows[1].label, "▾ guide/");
         assert_eq!(rows[2].label, "    setup.md");
         assert!(rows[2].is_selected);
+    }
+
+    #[test]
+    fn clamps_preview_scroll_to_the_terminal_coordinate_range() {
+        assert_eq!(preview_scroll_offset(12), 12);
+        assert_eq!(preview_scroll_offset(usize::MAX), u16::MAX);
     }
 }

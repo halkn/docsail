@@ -77,7 +77,15 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
         let document = selected_document(&tree, app.selected_file_index())?;
         terminal
             .terminal_mut()
-            .draw(|frame| ui::render(frame, &tree, app.selected_file_index(), &document))
+            .draw(|frame| {
+                ui::render(
+                    frame,
+                    &tree,
+                    app.selected_file_index(),
+                    app.preview_scroll(),
+                    &document,
+                )
+            })
             .map(|_| ())
     });
     let restore_result = terminal.restore();
