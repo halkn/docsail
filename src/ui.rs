@@ -68,6 +68,50 @@ fn render_preview(
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             MarkdownBlock::Paragraph(content) => Some((inline_text(content), Style::default())),
+            MarkdownBlock::List { ordered, items } => Some((
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        let marker = item
+                            .task
+                            .map(|done| if done { "[x] " } else { "[ ] " })
+                            .unwrap_or("");
+                        let prefix = if *ordered {
+                            format!("{}. ", index + 1)
+                        } else {
+                            "- ".to_owned()
+                        };
+                        format!(
+                            "{prefix}{marker}{}",
+                            item.blocks
+                                .iter()
+                                .filter_map(|block| match block {
+                                    MarkdownBlock::Paragraph(content) => Some(inline_text(content)),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                Style::default(),
+            )),
+            MarkdownBlock::BlockQuote(blocks) => Some((
+                format!(
+                    "> {}",
+                    blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            MarkdownBlock::Paragraph(content) => Some(inline_text(content)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                Style::default(),
+            )),
             MarkdownBlock::Table { header, rows } => {
                 Some((table_text(header, rows), Style::default()))
             }

@@ -18,12 +18,14 @@ impl Document {
 pub fn parse(source: &str) -> Document {
     let mut blocks = Vec::new();
     let mut active_block = None;
+    let mut list = None;
+    let mut quote_blocks = None;
     let mut table = None;
     let mut inline_spans = Vec::new();
 
     let mut options = Options::empty();
+    options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_TABLES);
-
     for event in Parser::new_ext(source, options) {
         match event {
             Event::Start(Tag::Link { dest_url, .. }) => {
@@ -109,7 +111,12 @@ pub fn parse(source: &str) -> Document {
             }
             Event::End(TagEnd::Heading(_)) => {
                 if let Some(ActiveBlock::Heading { level, content }) = active_block.take() {
-                    blocks.push(Block::Heading { level, content });
+                    push_block(
+                        &mut blocks,
+                        &mut list,
+                        &mut quote_blocks,
+                        Block::Heading { level, content },
+                    );
                 }
             }
             Event::Start(Tag::Paragraph) => {
@@ -117,7 +124,52 @@ pub fn parse(source: &str) -> Document {
             }
             Event::End(TagEnd::Paragraph) => {
                 if let Some(ActiveBlock::Paragraph(content)) = active_block.take() {
-                    blocks.push(Block::Paragraph(content));
+                    push_block(
+                        &mut blocks,
+                        &mut list,
+                        &mut quote_blocks,
+                        Block::Paragraph(content),
+                    );
+                }
+            }
+            Event::Start(Tag::List(start)) => list = Some(ListContext::new(start.is_some())),
+            Event::Start(Tag::Item) => {
+                if let Some(list) = &mut list {
+                    list.current = Some(ListItem {
+                        task: None,
+                        blocks: Vec::new(),
+                    });
+                }
+            }
+            Event::TaskListMarker(checked) => {
+                if let Some(Some(item)) = list.as_mut().map(|list| list.current.as_mut()) {
+                    item.task = Some(checked);
+                }
+            }
+            Event::End(TagEnd::Item) => {
+                if let Some(list) = &mut list
+                    && let Some(item) = list.current.take()
+                {
+                    list.items.push(item);
+                }
+            }
+            Event::End(TagEnd::List(_)) => {
+                if let Some(list) = list.take() {
+                    push_block(
+                        &mut blocks,
+                        &mut None,
+                        &mut quote_blocks,
+                        Block::List {
+                            ordered: list.ordered,
+                            items: list.items,
+                        },
+                    );
+                }
+            }
+            Event::Start(Tag::BlockQuote(_)) => quote_blocks = Some(Vec::new()),
+            Event::End(TagEnd::BlockQuote(_)) => {
+                if let Some(quoted) = quote_blocks.take() {
+                    blocks.push(Block::BlockQuote(quoted));
                 }
             }
             Event::Text(text) => {
@@ -135,6 +187,36 @@ pub fn parse(source: &str) -> Document {
     }
 
     Document::new(blocks)
+}
+
+struct ListContext {
+    ordered: bool,
+    items: Vec<ListItem>,
+    current: Option<ListItem>,
+}
+impl ListContext {
+    fn new(ordered: bool) -> Self {
+        Self {
+            ordered,
+            items: Vec::new(),
+            current: None,
+        }
+    }
+}
+
+fn push_block(
+    blocks: &mut Vec<Block>,
+    list: &mut Option<ListContext>,
+    quote: &mut Option<Vec<Block>>,
+    block: Block,
+) {
+    if let Some(Some(item)) = list.as_mut().map(|list| list.current.as_mut()) {
+        item.blocks.push(block);
+    } else if let Some(quoted) = quote {
+        quoted.push(block);
+    } else {
+        blocks.push(block);
+    }
 }
 
 enum InlineSpan {
@@ -293,6 +375,15 @@ mod tests {
                 Block::Paragraph(vec![Inline::Text("A terminal Markdown viewer.".to_owned())]),
             ]
         );
+    }
+
+    #[test]
+    fn parses_lists_tasks_and_blockquotes() {
+        let document = parse("- [x] done\n- next\n\n> quoted");
+        assert!(
+            matches!(&document.blocks()[0], Block::List { items, .. } if items[0].task == Some(true))
+        );
+        assert!(matches!(&document.blocks()[1], Block::BlockQuote(_)));
     }
 
     #[test]
