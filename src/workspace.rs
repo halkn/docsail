@@ -19,6 +19,13 @@ impl WorkspaceTarget {
             Self::File(path) | Self::Directory(path) => path,
         }
     }
+
+    pub fn tree_root(&self) -> PathBuf {
+        match self {
+            Self::Directory(path) => path.clone(),
+            Self::File(path) => path.parent().unwrap_or(path).to_path_buf(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -63,6 +70,17 @@ impl FileTree {
 
     pub fn root(&self) -> &FileTreeNode {
         &self.root
+    }
+
+    pub fn file_count(&self) -> usize {
+        file_count(&self.root)
+    }
+}
+
+fn file_count(node: &FileTreeNode) -> usize {
+    match node {
+        FileTreeNode::Directory { children, .. } => children.iter().map(file_count).sum(),
+        FileTreeNode::File { .. } => 1,
     }
 }
 
@@ -516,6 +534,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(tree.root().path(), root);
+        assert_eq!(tree.file_count(), 3);
         assert_eq!(tree.root().children().len(), 2);
         assert!(matches!(
             &tree.root().children()[0],

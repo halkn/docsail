@@ -1,8 +1,12 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    widgets::{Block, Borders},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
 };
+
+use crate::workspace::{FileTree, FileTreeNode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TwoPaneLayout {
@@ -17,22 +21,97 @@ pub fn two_pane_layout(area: Rect) -> TwoPaneLayout {
     TwoPaneLayout { file_tree, preview }
 }
 
-pub fn render(frame: &mut Frame<'_>) {
+pub fn render(frame: &mut Frame<'_>, tree: &FileTree, selected_file_index: usize) {
     let layout = two_pane_layout(frame.area());
-    frame.render_widget(
-        Block::default().borders(Borders::ALL).title("Files"),
-        layout.file_tree,
-    );
+    render_file_tree(frame, layout.file_tree, tree, selected_file_index);
     frame.render_widget(
         Block::default().borders(Borders::ALL).title("Preview"),
         layout.preview,
     );
 }
 
+fn render_file_tree(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tree: &FileTree,
+    selected_file_index: usize,
+) {
+    let rows = file_tree_rows(tree, selected_file_index);
+    let lines = rows
+        .into_iter()
+        .map(FileTreeRow::into_line)
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Files")),
+        area,
+    );
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FileTreeRow {
+    label: String,
+    is_selected: bool,
+}
+
+impl FileTreeRow {
+    fn into_line(self) -> Line<'static> {
+        let style = if self.is_selected {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+
+        Line::from(Span::styled(self.label, style))
+    }
+}
+
+fn file_tree_rows(tree: &FileTree, selected_file_index: usize) -> Vec<FileTreeRow> {
+    let mut rows = Vec::new();
+    let mut file_index = 0;
+    append_tree_rows(
+        tree.root().children(),
+        0,
+        selected_file_index,
+        &mut file_index,
+        &mut rows,
+    );
+    rows
+}
+
+fn append_tree_rows(
+    nodes: &[FileTreeNode],
+    depth: usize,
+    selected_file_index: usize,
+    file_index: &mut usize,
+    rows: &mut Vec<FileTreeRow>,
+) {
+    for node in nodes {
+        let indent = "  ".repeat(depth);
+        match node {
+            FileTreeNode::Directory { name, children, .. } => {
+                rows.push(FileTreeRow {
+                    label: format!("{indent}▾ {}/", name.to_string_lossy()),
+                    is_selected: false,
+                });
+                append_tree_rows(children, depth + 1, selected_file_index, file_index, rows);
+            }
+            FileTreeNode::File { name, .. } => {
+                rows.push(FileTreeRow {
+                    label: format!("{indent}  {}", name.to_string_lossy()),
+                    is_selected: *file_index == selected_file_index,
+                });
+                *file_index += 1;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::two_pane_layout;
+    use super::{file_tree_rows, two_pane_layout};
+    use crate::workspace::FileTree;
     use ratatui::layout::Rect;
+    use std::path::PathBuf;
 
     #[test]
     fn splits_the_available_width_between_file_tree_and_preview() {
@@ -52,5 +131,23 @@ mod tests {
         assert_eq!(layout.file_tree.right(), layout.preview.x);
         assert_eq!(layout.file_tree.height, area.height);
         assert_eq!(layout.preview.height, area.height);
+    }
+
+    #[test]
+    fn renders_directories_and_marks_the_selected_file() {
+        let root = PathBuf::from("workspace");
+        let tree = FileTree::from_files(
+            &root,
+            vec![root.join("guide/setup.md"), root.join("README.md")],
+        )
+        .unwrap();
+
+        let rows = file_tree_rows(&tree, 1);
+
+        assert_eq!(rows[0].label, "  README.md");
+        assert!(!rows[0].is_selected);
+        assert_eq!(rows[1].label, "▾ guide/");
+        assert_eq!(rows[2].label, "    setup.md");
+        assert!(rows[2].is_selected);
     }
 }

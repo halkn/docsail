@@ -15,14 +15,29 @@ pub enum AppEvent {
     Quit,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct App {
     focus: Focus,
     is_running: bool,
     selected_file_index: usize,
+    file_count: usize,
     preview_scroll: usize,
     activation_requested: bool,
     reload_requested: bool,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            focus: Focus::default(),
+            is_running: false,
+            selected_file_index: 0,
+            file_count: usize::MAX,
+            preview_scroll: 0,
+            activation_requested: false,
+            reload_requested: false,
+        }
+    }
 }
 
 impl App {
@@ -43,6 +58,11 @@ impl App {
 
     pub fn selected_file_index(&self) -> usize {
         self.selected_file_index
+    }
+
+    pub fn set_file_count(&mut self, file_count: usize) {
+        self.file_count = file_count;
+        self.selected_file_index = self.selected_file_index.min(file_count.saturating_sub(1));
     }
 
     pub fn preview_scroll(&self) -> usize {
@@ -71,7 +91,12 @@ impl App {
     fn move_down(&mut self) {
         match self.focus {
             Focus::FileTree => {
-                self.selected_file_index = self.selected_file_index.saturating_add(1)
+                if self.file_count > 0 {
+                    self.selected_file_index = self
+                        .selected_file_index
+                        .saturating_add(1)
+                        .min(self.file_count.saturating_sub(1));
+                }
             }
             Focus::Preview => self.preview_scroll = self.preview_scroll.saturating_add(1),
         }
@@ -101,6 +126,7 @@ mod tests {
     #[test]
     fn moves_the_file_selection_when_the_file_tree_is_focused() {
         let mut app = App::new();
+        app.set_file_count(3);
 
         app.update(AppEvent::MoveDown);
         app.update(AppEvent::MoveDown);
@@ -108,6 +134,27 @@ mod tests {
 
         assert_eq!(app.selected_file_index(), 1);
         assert_eq!(app.preview_scroll(), 0);
+    }
+
+    #[test]
+    fn keeps_file_selection_within_the_available_files() {
+        let mut app = App::new();
+        app.set_file_count(2);
+
+        app.update(AppEvent::MoveDown);
+        app.update(AppEvent::MoveDown);
+
+        assert_eq!(app.selected_file_index(), 1);
+    }
+
+    #[test]
+    fn keeps_the_file_selection_at_zero_when_the_tree_is_empty() {
+        let mut app = App::new();
+        app.set_file_count(0);
+
+        app.update(AppEvent::MoveDown);
+
+        assert_eq!(app.selected_file_index(), 0);
     }
 
     #[test]
