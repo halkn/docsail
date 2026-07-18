@@ -5,8 +5,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
+    app::Focus,
     markdown::{Block as MarkdownBlock, Document, HeadingLevel, Inline},
     workspace::{FileTree, FileTreeNode},
 };
@@ -28,24 +30,45 @@ pub fn render(
     frame: &mut Frame<'_>,
     tree: &FileTree,
     selected_file_index: usize,
+    focus: Focus,
+    preview_scroll: usize,
     document: &Document,
 ) {
     let layout = two_pane_layout(frame.area());
-    render_file_tree(frame, layout.file_tree, tree, selected_file_index);
-    render_preview(frame, layout.preview, document);
+    render_file_tree(
+        frame,
+        layout.file_tree,
+        tree,
+        selected_file_index,
+        focus == Focus::FileTree,
+    );
+    render_preview(
+        frame,
+        layout.preview,
+        preview_scroll,
+        focus == Focus::Preview,
+        document,
+    );
 }
 
-fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
+fn render_preview(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    preview_scroll: usize,
+    is_focused: bool,
+    document: &Document,
+) {
+    let width = usize::from(area.width.saturating_sub(2));
     let lines = document
         .blocks()
         .iter()
         .filter_map(|block| match block {
-            MarkdownBlock::Heading { level, content } => Some(Line::from(Span::styled(
+            MarkdownBlock::Heading { level, content } => Some((
                 format!("{} {}", heading_marker(*level), inline_text(content)),
                 Style::default().add_modifier(Modifier::BOLD),
-            ))),
-            MarkdownBlock::Paragraph(content) => Some(Line::from(inline_text(content))),
-            MarkdownBlock::List { ordered, items } => Some(Line::from(
+            )),
+            MarkdownBlock::Paragraph(content) => Some((inline_text(content), Style::default())),
+            MarkdownBlock::List { ordered, items } => Some((
                 items
                     .iter()
                     .enumerate()
@@ -73,25 +96,84 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),
+                Style::default(),
             )),
-            MarkdownBlock::BlockQuote(blocks) => Some(Line::from(format!(
-                "> {}",
-                blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        MarkdownBlock::Paragraph(content) => Some(inline_text(content)),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ))),
+            MarkdownBlock::BlockQuote(blocks) => Some((
+                format!(
+                    "> {}",
+                    blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            MarkdownBlock::Paragraph(content) => Some(inline_text(content)),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+                Style::default(),
+            )),
+            MarkdownBlock::Table { header, rows } => {
+                Some((table_text(header, rows), Style::default()))
+            }
             _ => None,
+        })
+        .flat_map(|(text, style)| {
+            wrap_unicode(&text, width)
+                .into_iter()
+                .map(move |line| Line::from(Span::styled(line, style)))
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Preview")),
+        Paragraph::new(lines)
+            .scroll((preview_scroll_offset(preview_scroll), 0))
+            .block(pane_block("Preview", is_focused)),
         area,
     );
+}
+
+fn preview_scroll_offset(scroll: usize) -> u16 {
+    u16::try_from(scroll).unwrap_or(u16::MAX)
+}
+
+fn wrap_unicode(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut line_width = 0;
+    for character in text.chars() {
+        if character == '\n' {
+            lines.push(std::mem::take(&mut line));
+            line_width = 0;
+            continue;
+        }
+        let character_width = character.width().unwrap_or(0);
+        if line_width > 0 && line_width + character_width > width {
+            lines.push(std::mem::take(&mut line));
+            line_width = 0;
+        }
+        line.push(character);
+        line_width += character_width;
+    }
+    lines.push(line);
+    lines
+}
+
+fn table_text(header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
+    std::iter::once(header)
+        .chain(rows.iter().map(Vec::as_slice))
+        .map(|row| {
+            format!(
+                "| {} |",
+                row.iter()
+                    .map(|cell| inline_text(cell))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn heading_marker(level: HeadingLevel) -> &'static str {
@@ -123,6 +205,7 @@ fn render_file_tree(
     area: Rect,
     tree: &FileTree,
     selected_file_index: usize,
+    is_focused: bool,
 ) {
     let rows = file_tree_rows(tree, selected_file_index);
     let lines = rows
@@ -130,9 +213,21 @@ fn render_file_tree(
         .map(FileTreeRow::into_line)
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Files")),
+        Paragraph::new(lines).block(pane_block("Files", is_focused)),
         area,
     );
+}
+
+fn pane_block(title: &str, is_focused: bool) -> Block<'_> {
+    let style = if is_focused {
+        Style::default().fg(ratatui::style::Color::Cyan)
+    } else {
+        Style::default()
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(style)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -196,7 +291,7 @@ fn append_tree_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{file_tree_rows, two_pane_layout};
+    use super::{file_tree_rows, preview_scroll_offset, two_pane_layout, wrap_unicode};
     use crate::workspace::FileTree;
     use ratatui::layout::Rect;
     use std::path::PathBuf;
@@ -237,5 +332,16 @@ mod tests {
         assert_eq!(rows[1].label, "▾ guide/");
         assert_eq!(rows[2].label, "    setup.md");
         assert!(rows[2].is_selected);
+    }
+
+    #[test]
+    fn clamps_preview_scroll_to_the_terminal_coordinate_range() {
+        assert_eq!(preview_scroll_offset(12), 12);
+        assert_eq!(preview_scroll_offset(usize::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn wraps_japanese_text_at_terminal_display_width() {
+        assert_eq!(wrap_unicode("日本語abc", 6), ["日本語", "abc"]);
     }
 }
