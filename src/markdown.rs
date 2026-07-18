@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, HeadingLevel as ParserHeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel as ParserHeadingLevel, Options, Parser, Tag, TagEnd};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Document {
@@ -18,9 +18,65 @@ impl Document {
 pub fn parse(source: &str) -> Document {
     let mut blocks = Vec::new();
     let mut active_block = None;
+    let mut table = None;
 
-    for event in Parser::new(source) {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+
+    for event in Parser::new_ext(source, options) {
         match event {
+            Event::Start(Tag::Table(_)) => table = Some(TableContext::default()),
+            Event::Start(Tag::TableHead) => {
+                if let Some(table) = &mut table {
+                    table.in_header = true;
+                    table.current_row = Some(Vec::new());
+                }
+            }
+            Event::End(TagEnd::TableHead) => {
+                if let Some(table) = &mut table {
+                    if let Some(row) = table.current_row.take() {
+                        table.header = row;
+                    }
+                    table.in_header = false;
+                }
+            }
+            Event::Start(Tag::TableRow) => {
+                if let Some(table) = &mut table {
+                    table.current_row = Some(Vec::new());
+                }
+            }
+            Event::End(TagEnd::TableRow) => {
+                if let Some(table) = &mut table
+                    && let Some(row) = table.current_row.take()
+                {
+                    if table.in_header {
+                        table.header = row;
+                    } else {
+                        table.rows.push(row);
+                    }
+                }
+            }
+            Event::Start(Tag::TableCell) => {
+                if let Some(table) = &mut table {
+                    table.current_cell = Some(Vec::new());
+                }
+            }
+            Event::End(TagEnd::TableCell) => {
+                if let Some(table) = &mut table
+                    && let Some(cell) = table.current_cell.take()
+                    && let Some(row) = &mut table.current_row
+                {
+                    row.push(cell);
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                if let Some(table) = table.take() {
+                    blocks.push(Block::Table {
+                        header: table.header,
+                        rows: table.rows,
+                    });
+                }
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 active_block = Some(ActiveBlock::Heading {
                     level: heading_level(level),
@@ -40,7 +96,13 @@ pub fn parse(source: &str) -> Document {
                     blocks.push(Block::Paragraph(content));
                 }
             }
-            Event::Text(text) => push_inline(&mut active_block, Inline::Text(text.into_string())),
+            Event::Text(text) => {
+                if let Some(Some(cell)) = table.as_mut().map(|table| table.current_cell.as_mut()) {
+                    cell.push(Inline::Text(text.into_string()));
+                } else {
+                    push_inline(&mut active_block, Inline::Text(text.into_string()));
+                }
+            }
             Event::Code(code) => push_inline(&mut active_block, Inline::Code(code.into_string())),
             Event::SoftBreak => push_inline(&mut active_block, Inline::SoftBreak),
             Event::HardBreak => push_inline(&mut active_block, Inline::HardBreak),
@@ -49,6 +111,15 @@ pub fn parse(source: &str) -> Document {
     }
 
     Document::new(blocks)
+}
+
+#[derive(Default)]
+struct TableContext {
+    header: Vec<Vec<Inline>>,
+    rows: Vec<Vec<Vec<Inline>>>,
+    current_row: Option<Vec<Vec<Inline>>>,
+    current_cell: Option<Vec<Inline>>,
+    in_header: bool,
 }
 
 enum ActiveBlock {
@@ -155,6 +226,14 @@ mod tests {
                 },
                 Block::Paragraph(vec![Inline::Text("A terminal Markdown viewer.".to_owned())]),
             ]
+        );
+    }
+
+    #[test]
+    fn parses_gfm_tables() {
+        let document = parse("| Name | Value |\n| --- | --- |\n| DocSail | TUI |");
+        assert!(
+            matches!(&document.blocks()[0], Block::Table { header, rows } if header.len() == 2 && rows.len() == 1)
         );
     }
 
