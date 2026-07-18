@@ -1,5 +1,6 @@
 use pulldown_cmark::{
-    CodeBlockKind, Event, HeadingLevel as ParserHeadingLevel, Options, Parser, Tag, TagEnd,
+    CodeBlockKind, Event, HeadingLevel as ParserHeadingLevel, LinkType, Options, Parser, Tag,
+    TagEnd,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -29,8 +30,36 @@ pub fn parse(source: &str) -> Document {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
     for event in Parser::new_ext(source, options) {
         match event {
+            Event::Start(Tag::Emphasis) => {
+                start_inline_span(&mut inline_spans, &mut active_block, &mut table, |start| {
+                    InlineSpan::Emphasis { start }
+                });
+            }
+            Event::Start(Tag::Strong) => {
+                start_inline_span(&mut inline_spans, &mut active_block, &mut table, |start| {
+                    InlineSpan::Strong { start }
+                });
+            }
+            Event::Start(Tag::Strikethrough) => {
+                start_inline_span(&mut inline_spans, &mut active_block, &mut table, |start| {
+                    InlineSpan::Strikethrough { start }
+                });
+            }
+            Event::Start(Tag::Link {
+                link_type: LinkType::Autolink | LinkType::Email,
+                dest_url,
+                ..
+            }) => {
+                start_inline_span(&mut inline_spans, &mut active_block, &mut table, |start| {
+                    InlineSpan::Autolink {
+                        start,
+                        destination: dest_url.into_string(),
+                    }
+                });
+            }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 if let Some(content) = active_content(&mut active_block, &mut table) {
                     inline_spans.push(InlineSpan::Link {
@@ -48,6 +77,15 @@ pub fn parse(source: &str) -> Document {
                 }
             }
             Event::End(TagEnd::Link) | Event::End(TagEnd::Image) => {
+                if let Some(span) = inline_spans.pop()
+                    && let Some(content) = active_content(&mut active_block, &mut table)
+                {
+                    span.wrap(content);
+                }
+            }
+            Event::End(TagEnd::Emphasis)
+            | Event::End(TagEnd::Strong)
+            | Event::End(TagEnd::Strikethrough) => {
                 if let Some(span) = inline_spans.pop()
                     && let Some(content) = active_content(&mut active_block, &mut table)
                 {
@@ -135,6 +173,12 @@ pub fn parse(source: &str) -> Document {
                     );
                 }
             }
+            Event::Rule => push_block(
+                &mut blocks,
+                &mut list,
+                &mut quote_blocks,
+                Block::ThematicBreak,
+            ),
             Event::Start(Tag::List(start)) => list = Some(ListContext::new(start.is_some())),
             Event::Start(Tag::Item) => {
                 if let Some(list) = &mut list {
@@ -250,27 +294,49 @@ fn push_block(
 }
 
 enum InlineSpan {
+    Emphasis { start: usize },
+    Strong { start: usize },
+    Strikethrough { start: usize },
     Link { start: usize, destination: String },
     Image { start: usize, destination: String },
+    Autolink { start: usize, destination: String },
 }
 impl InlineSpan {
     fn wrap(self, content: &mut Vec<Inline>) {
-        let (start, destination, image) = match self {
-            Self::Link { start, destination } => (start, destination, false),
-            Self::Image { start, destination } => (start, destination, true),
+        let start = match &self {
+            Self::Emphasis { start }
+            | Self::Strong { start }
+            | Self::Strikethrough { start }
+            | Self::Link { start, .. }
+            | Self::Image { start, .. }
+            | Self::Autolink { start, .. } => *start,
         };
         let nested = content.split_off(start);
-        content.push(if image {
-            Inline::Image {
-                alt: nested,
-                destination,
-            }
-        } else {
-            Inline::Link {
+        content.push(match self {
+            Self::Emphasis { .. } => Inline::Emphasis(nested),
+            Self::Strong { .. } => Inline::Strong(nested),
+            Self::Strikethrough { .. } => Inline::Strikethrough(nested),
+            Self::Link { destination, .. } => Inline::Link {
                 content: nested,
                 destination,
-            }
+            },
+            Self::Image { destination, .. } => Inline::Image {
+                alt: nested,
+                destination,
+            },
+            Self::Autolink { destination, .. } => Inline::Autolink(destination),
         });
+    }
+}
+
+fn start_inline_span(
+    inline_spans: &mut Vec<InlineSpan>,
+    active_block: &mut Option<ActiveBlock>,
+    table: &mut Option<TableContext>,
+    make_span: impl FnOnce(usize) -> InlineSpan,
+) {
+    if let Some(content) = active_content(active_block, table) {
+        inline_spans.push(make_span(content.len()));
     }
 }
 
@@ -451,6 +517,18 @@ mod tests {
         assert!(
             matches!(&document.blocks()[0], Block::Table { header, .. } if matches!(header[0][0], Inline::Link { .. }) && matches!(header[1][0], Inline::Image { .. }))
         );
+    }
+
+    #[test]
+    fn parses_emphasis_strikethrough_autolinks_and_thematic_breaks() {
+        let document = parse("*emphasis* **strong** ~~strike~~ <https://example.invalid>\n\n---");
+
+        assert!(matches!(&document.blocks()[0], Block::Paragraph(content)
+                if matches!(content[0], Inline::Emphasis(_))
+                && matches!(content[2], Inline::Strong(_))
+                && matches!(content[4], Inline::Strikethrough(_))
+                && matches!(content[6], Inline::Autolink(_))));
+        assert!(matches!(document.blocks()[1], Block::ThematicBreak));
     }
 
     #[test]

@@ -62,17 +62,17 @@ fn render_preview(
     let lines = document
         .blocks()
         .iter()
-        .filter_map(|block| match block {
-            MarkdownBlock::Heading { level, content } => Some((
+        .map(|block| match block {
+            MarkdownBlock::Heading { level, content } => (
                 format!("{} {}", heading_marker(*level), inline_text(content)),
                 Style::default().add_modifier(Modifier::BOLD),
-            )),
-            MarkdownBlock::Paragraph(content) => Some((inline_text(content), Style::default())),
-            MarkdownBlock::CodeBlock { language, content } => Some((
+            ),
+            MarkdownBlock::Paragraph(content) => (inline_text(content), Style::default()),
+            MarkdownBlock::CodeBlock { language, content } => (
                 format!("```{}\n{}\n```", language.as_deref().unwrap_or(""), content),
                 Style::default(),
-            )),
-            MarkdownBlock::List { ordered, items } => Some((
+            ),
+            MarkdownBlock::List { ordered, items } => (
                 items
                     .iter()
                     .enumerate()
@@ -101,8 +101,8 @@ fn render_preview(
                     .collect::<Vec<_>>()
                     .join("\n"),
                 Style::default(),
-            )),
-            MarkdownBlock::BlockQuote(blocks) => Some((
+            ),
+            MarkdownBlock::BlockQuote(blocks) => (
                 format!(
                     "> {}",
                     blocks
@@ -115,11 +115,9 @@ fn render_preview(
                         .join(" ")
                 ),
                 Style::default(),
-            )),
-            MarkdownBlock::Table { header, rows } => {
-                Some((table_text(header, rows), Style::default()))
-            }
-            _ => None,
+            ),
+            MarkdownBlock::Table { header, rows } => (table_text(header, rows), Style::default()),
+            MarkdownBlock::ThematicBreak => ("---".to_owned(), Style::default()),
         })
         .flat_map(|(text, style)| {
             wrap_unicode(&text, width)
@@ -194,7 +192,12 @@ fn heading_marker(level: HeadingLevel) -> &'static str {
 fn inline_text(inlines: &[Inline]) -> String {
     inlines.iter().fold(String::new(), |mut text, inline| {
         match inline {
-            Inline::Text(value) | Inline::Autolink(value) => text.push_str(value),
+            Inline::Text(value) => text.push_str(value),
+            Inline::Autolink(value) => {
+                text.push('<');
+                text.push_str(value);
+                text.push('>');
+            }
             Inline::Code(value) => {
                 text.push('`');
                 text.push_str(value);
@@ -216,8 +219,22 @@ fn inline_text(inlines: &[Inline]) -> String {
                 text.push_str(destination);
                 text.push_str(")]");
             }
+            Inline::Emphasis(content) => {
+                text.push('*');
+                text.push_str(&inline_text(content));
+                text.push('*');
+            }
+            Inline::Strong(content) => {
+                text.push_str("**");
+                text.push_str(&inline_text(content));
+                text.push_str("**");
+            }
+            Inline::Strikethrough(content) => {
+                text.push_str("~~");
+                text.push_str(&inline_text(content));
+                text.push_str("~~");
+            }
             Inline::SoftBreak | Inline::HardBreak => text.push('\n'),
-            _ => {}
         }
         text
     })
@@ -314,7 +331,10 @@ fn append_tree_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{file_tree_rows, preview_scroll_offset, two_pane_layout, wrap_unicode};
+    use super::{
+        file_tree_rows, inline_text, preview_scroll_offset, two_pane_layout, wrap_unicode,
+    };
+    use crate::markdown::Inline;
     use crate::workspace::FileTree;
     use ratatui::layout::Rect;
     use std::path::PathBuf;
@@ -366,5 +386,23 @@ mod tests {
     #[test]
     fn wraps_japanese_text_at_terminal_display_width() {
         assert_eq!(wrap_unicode("日本語abc", 6), ["日本語", "abc"]);
+    }
+
+    #[test]
+    fn formats_remaining_gfm_inlines() {
+        let inlines = [
+            Inline::Emphasis(vec![Inline::Text("emphasis".to_owned())]),
+            Inline::Text(" ".to_owned()),
+            Inline::Strong(vec![Inline::Text("strong".to_owned())]),
+            Inline::Text(" ".to_owned()),
+            Inline::Strikethrough(vec![Inline::Text("strike".to_owned())]),
+            Inline::Text(" ".to_owned()),
+            Inline::Autolink("https://example.invalid".to_owned()),
+        ];
+
+        assert_eq!(
+            inline_text(&inlines),
+            "*emphasis* **strong** ~~strike~~ <https://example.invalid>"
+        );
     }
 }
