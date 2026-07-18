@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
     app::Focus,
@@ -44,23 +45,56 @@ pub fn render(
 }
 
 fn render_preview(frame: &mut Frame<'_>, area: Rect, is_focused: bool, document: &Document) {
+    let width = usize::from(area.width.saturating_sub(2));
     let lines = document
         .blocks()
         .iter()
         .filter_map(|block| match block {
-            MarkdownBlock::Heading { level, content } => Some(Line::from(Span::styled(
+            MarkdownBlock::Heading { level, content } => Some((
                 format!("{} {}", heading_marker(*level), inline_text(content)),
                 Style::default().add_modifier(Modifier::BOLD),
-            ))),
-            MarkdownBlock::Paragraph(content) => Some(Line::from(inline_text(content))),
-            MarkdownBlock::Table { header, rows } => Some(Line::from(table_text(header, rows))),
+            )),
+            MarkdownBlock::Paragraph(content) => Some((inline_text(content), Style::default())),
+            MarkdownBlock::Table { header, rows } => {
+                Some((table_text(header, rows), Style::default()))
+            }
             _ => None,
+        })
+        .flat_map(|(text, style)| {
+            wrap_unicode(&text, width)
+                .into_iter()
+                .map(move |line| Line::from(Span::styled(line, style)))
         })
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(lines).block(pane_block("Preview", is_focused)),
         area,
     );
+}
+
+fn wrap_unicode(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut line_width = 0;
+    for character in text.chars() {
+        if character == '\n' {
+            lines.push(std::mem::take(&mut line));
+            line_width = 0;
+            continue;
+        }
+        let character_width = character.width().unwrap_or(0);
+        if line_width > 0 && line_width + character_width > width {
+            lines.push(std::mem::take(&mut line));
+            line_width = 0;
+        }
+        line.push(character);
+        line_width += character_width;
+    }
+    lines.push(line);
+    lines
 }
 
 fn table_text(header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
@@ -194,7 +228,7 @@ fn append_tree_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{file_tree_rows, two_pane_layout};
+    use super::{file_tree_rows, two_pane_layout, wrap_unicode};
     use crate::workspace::FileTree;
     use ratatui::layout::Rect;
     use std::path::PathBuf;
@@ -235,5 +269,10 @@ mod tests {
         assert_eq!(rows[1].label, "▾ guide/");
         assert_eq!(rows[2].label, "    setup.md");
         assert!(rows[2].is_selected);
+    }
+
+    #[test]
+    fn wraps_japanese_text_at_terminal_display_width() {
+        assert_eq!(wrap_unicode("日本語abc", 6), ["日本語", "abc"]);
     }
 }
