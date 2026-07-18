@@ -18,9 +18,33 @@ impl Document {
 pub fn parse(source: &str) -> Document {
     let mut blocks = Vec::new();
     let mut active_block = None;
+    let mut inline_spans = Vec::new();
 
     for event in Parser::new(source) {
         match event {
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                if let Some(content) = active_content(&mut active_block) {
+                    inline_spans.push(InlineSpan::Link {
+                        start: content.len(),
+                        destination: dest_url.into_string(),
+                    });
+                }
+            }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                if let Some(content) = active_content(&mut active_block) {
+                    inline_spans.push(InlineSpan::Image {
+                        start: content.len(),
+                        destination: dest_url.into_string(),
+                    });
+                }
+            }
+            Event::End(TagEnd::Link) | Event::End(TagEnd::Image) => {
+                if let Some(span) = inline_spans.pop()
+                    && let Some(content) = active_content(&mut active_block)
+                {
+                    span.wrap(content);
+                }
+            }
             Event::Start(Tag::Heading { level, .. }) => {
                 active_block = Some(ActiveBlock::Heading {
                     level: heading_level(level),
@@ -49,6 +73,40 @@ pub fn parse(source: &str) -> Document {
     }
 
     Document::new(blocks)
+}
+
+enum InlineSpan {
+    Link { start: usize, destination: String },
+    Image { start: usize, destination: String },
+}
+impl InlineSpan {
+    fn wrap(self, content: &mut Vec<Inline>) {
+        let (start, destination, image) = match self {
+            Self::Link { start, destination } => (start, destination, false),
+            Self::Image { start, destination } => (start, destination, true),
+        };
+        let nested = content.split_off(start);
+        content.push(if image {
+            Inline::Image {
+                alt: nested,
+                destination,
+            }
+        } else {
+            Inline::Link {
+                content: nested,
+                destination,
+            }
+        });
+    }
+}
+
+fn active_content(active_block: &mut Option<ActiveBlock>) -> Option<&mut Vec<Inline>> {
+    match active_block {
+        Some(ActiveBlock::Heading { content, .. }) | Some(ActiveBlock::Paragraph(content)) => {
+            Some(content)
+        }
+        None => None,
+    }
 }
 
 enum ActiveBlock {
@@ -155,6 +213,14 @@ mod tests {
                 },
                 Block::Paragraph(vec![Inline::Text("A terminal Markdown viewer.".to_owned())]),
             ]
+        );
+    }
+
+    #[test]
+    fn parses_links_and_images() {
+        let document = parse("[DocSail](https://example.invalid) ![Logo](logo.png)");
+        assert!(
+            matches!(&document.blocks()[0], Block::Paragraph(content) if matches!(content[0], Inline::Link { .. }) && matches!(content[2], Inline::Image { .. }))
         );
     }
 
