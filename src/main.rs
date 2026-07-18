@@ -3,6 +3,7 @@ use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
 pub mod app;
 pub mod event;
 pub mod terminal;
+pub mod ui;
 pub mod workspace;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -70,7 +71,7 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let mut event_source = event::CrosstermEventSource;
 
     let run_result = event::run(&mut app, &mut event_source, |_| {
-        terminal.terminal_mut().draw(|_| {}).map(|_| ())
+        terminal.terminal_mut().draw(ui::render).map(|_| ())
     });
     let restore_result = terminal.restore();
 
