@@ -70,6 +70,64 @@ pub fn resolve(
     classify(path)
 }
 
+pub fn discover_markdown_files(target: &WorkspaceTarget) -> Result<Vec<PathBuf>, WorkspaceError> {
+    match target {
+        WorkspaceTarget::File(path) => Ok(is_markdown_file(path)
+            .then(|| path.clone())
+            .into_iter()
+            .collect()),
+        WorkspaceTarget::Directory(path) => {
+            let mut files = Vec::new();
+            collect_markdown_files(path, &mut files)?;
+            files.sort();
+            Ok(files)
+        }
+    }
+}
+
+fn collect_markdown_files(
+    directory: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), WorkspaceError> {
+    let entries = fs::read_dir(directory).map_err(|source| WorkspaceError::Io {
+        path: directory.to_path_buf(),
+        source,
+    })?;
+    let mut entries = entries
+        .map(|entry| {
+            entry.map_err(|source| WorkspaceError::Io {
+                path: directory.to_path_buf(),
+                source,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.path());
+
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| WorkspaceError::Io {
+            path: path.clone(),
+            source,
+        })?;
+
+        if file_type.is_dir() {
+            collect_markdown_files(&path, files)?;
+        } else if file_type.is_file() && is_markdown_file(&path) {
+            files.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn is_markdown_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+        })
+}
+
 fn classify(path: PathBuf) -> Result<WorkspaceTarget, WorkspaceError> {
     let metadata = match fs::metadata(&path) {
         Ok(metadata) => metadata,
@@ -95,7 +153,7 @@ fn classify(path: PathBuf) -> Result<WorkspaceTarget, WorkspaceError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkspaceError, WorkspaceTarget, resolve};
+    use super::{WorkspaceError, WorkspaceTarget, discover_markdown_files, resolve};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -187,5 +245,43 @@ mod tests {
         assert!(
             matches!(error, WorkspaceError::NotFound(path) if path == directory.path().join("missing.md"))
         );
+    }
+
+    #[test]
+    fn discovers_markdown_files_recursively_in_path_order() {
+        let directory = TestDirectory::new();
+        let nested = directory.path().join("guide").join("advanced");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(directory.path().join("README.md"), "# Read me").unwrap();
+        fs::write(directory.path().join("notes.MD"), "# Notes").unwrap();
+        fs::write(nested.join("setup.markdown"), "# Setup").unwrap();
+        fs::write(directory.path().join("ignored.txt"), "not markdown").unwrap();
+
+        let files = discover_markdown_files(&WorkspaceTarget::Directory(
+            fs::canonicalize(directory.path()).unwrap(),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            files,
+            vec![
+                fs::canonicalize(directory.path().join("README.md")).unwrap(),
+                fs::canonicalize(directory.path().join("guide/advanced/setup.markdown")).unwrap(),
+                fs::canonicalize(directory.path().join("notes.MD")).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn uses_an_explicit_markdown_file_as_the_only_result() {
+        let directory = TestDirectory::new();
+        let file = directory.path().join("README.md");
+        fs::write(&file, "# DocSail").unwrap();
+
+        let files =
+            discover_markdown_files(&WorkspaceTarget::File(fs::canonicalize(&file).unwrap()))
+                .unwrap();
+
+        assert_eq!(files, vec![fs::canonicalize(file).unwrap()]);
     }
 }

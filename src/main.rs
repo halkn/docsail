@@ -63,7 +63,8 @@ fn main() -> ExitCode {
 
 fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let current_directory = env::current_dir()?;
-    let _workspace = workspace::resolve(path.as_deref(), &current_directory)?;
+    let workspace = workspace::resolve(path.as_deref(), &current_directory)?;
+    let _markdown_files = workspace::discover_markdown_files(&workspace)?;
     let mut terminal = terminal::TerminalSession::enter()?;
     let mut app = app::App::new();
     let mut event_source = event::CrosstermEventSource;
