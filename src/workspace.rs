@@ -1,6 +1,8 @@
 use std::{
+    collections::BTreeMap,
+    ffi::OsString,
     fmt, fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use ignore::WalkBuilder;
@@ -17,6 +19,157 @@ impl WorkspaceTarget {
             Self::File(path) | Self::Directory(path) => path,
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct FileTree {
+    root: FileTreeNode,
+}
+
+impl FileTree {
+    pub fn from_files(
+        root: &Path,
+        files: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self, FileTreeError> {
+        let mut root_builder = DirectoryBuilder::default();
+        let mut files = files.into_iter().collect::<Vec<_>>();
+        files.sort();
+
+        for file in files {
+            let relative_path = file
+                .strip_prefix(root)
+                .map_err(|_| FileTreeError::OutsideRoot(file.clone()))?;
+            let components = relative_path
+                .components()
+                .map(|component| match component {
+                    Component::Normal(component) => Ok(component.to_os_string()),
+                    _ => Err(FileTreeError::OutsideRoot(file.clone())),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            if !components.is_empty() {
+                root_builder.insert(&components, file);
+            }
+        }
+
+        Ok(Self {
+            root: FileTreeNode::Directory {
+                name: display_name(root),
+                path: root.to_path_buf(),
+                children: root_builder.into_nodes(root),
+            },
+        })
+    }
+
+    pub fn root(&self) -> &FileTreeNode {
+        &self.root
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FileTreeNode {
+    Directory {
+        name: OsString,
+        path: PathBuf,
+        children: Vec<FileTreeNode>,
+    },
+    File {
+        name: OsString,
+        path: PathBuf,
+    },
+}
+
+impl FileTreeNode {
+    pub fn name(&self) -> &std::ffi::OsStr {
+        match self {
+            Self::Directory { name, .. } | Self::File { name, .. } => name,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Directory { path, .. } | Self::File { path, .. } => path,
+        }
+    }
+
+    pub fn children(&self) -> &[FileTreeNode] {
+        match self {
+            Self::Directory { children, .. } => children,
+            Self::File { .. } => &[],
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum FileTreeError {
+    OutsideRoot(PathBuf),
+}
+
+impl fmt::Display for FileTreeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutsideRoot(path) => write!(
+                formatter,
+                "file is outside the tree root: {}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FileTreeError {}
+
+#[derive(Default)]
+struct DirectoryBuilder {
+    children: BTreeMap<OsString, TreeBuilderNode>,
+}
+
+enum TreeBuilderNode {
+    Directory(DirectoryBuilder),
+    File(PathBuf),
+}
+
+impl DirectoryBuilder {
+    fn insert(&mut self, components: &[OsString], path: PathBuf) {
+        let (name, remaining) = components.split_first().expect("components are not empty");
+
+        if remaining.is_empty() {
+            self.children
+                .insert(name.clone(), TreeBuilderNode::File(path));
+            return;
+        }
+
+        let entry = self
+            .children
+            .entry(name.clone())
+            .or_insert_with(|| TreeBuilderNode::Directory(Self::default()));
+        if let TreeBuilderNode::Directory(directory) = entry {
+            directory.insert(remaining, path);
+        }
+    }
+
+    fn into_nodes(self, parent: &Path) -> Vec<FileTreeNode> {
+        self.children
+            .into_iter()
+            .map(|(name, node)| match node {
+                TreeBuilderNode::Directory(directory) => {
+                    let path = parent.join(&name);
+                    FileTreeNode::Directory {
+                        name,
+                        children: directory.into_nodes(&path),
+                        path,
+                    }
+                }
+                TreeBuilderNode::File(path) => FileTreeNode::File { name, path },
+            })
+            .collect()
+    }
+}
+
+fn display_name(path: &Path) -> OsString {
+    path.file_name()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| path.as_os_str().to_os_string())
 }
 
 #[derive(Debug)]
@@ -154,7 +307,9 @@ fn classify(path: PathBuf) -> Result<WorkspaceTarget, WorkspaceError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkspaceError, WorkspaceTarget, discover_markdown_files, resolve};
+    use super::{
+        FileTree, FileTreeNode, WorkspaceError, WorkspaceTarget, discover_markdown_files, resolve,
+    };
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -334,5 +489,54 @@ mod tests {
             files,
             vec![fs::canonicalize(docs.join("included.md")).unwrap()]
         );
+    }
+
+    #[test]
+    fn builds_a_file_tree_with_intermediate_directories_in_path_order() {
+        let directory = TestDirectory::new();
+        let guide = directory.path().join("guide");
+        let advanced = guide.join("advanced");
+        fs::create_dir_all(&advanced).unwrap();
+        let readme = directory.path().join("README.md");
+        let setup = advanced.join("setup.md");
+        let overview = guide.join("overview.md");
+        fs::write(&readme, "# Read me").unwrap();
+        fs::write(&setup, "# Setup").unwrap();
+        fs::write(&overview, "# Overview").unwrap();
+
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let tree = FileTree::from_files(
+            &root,
+            vec![
+                fs::canonicalize(setup).unwrap(),
+                fs::canonicalize(readme.clone()).unwrap(),
+                fs::canonicalize(overview).unwrap(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(tree.root().path(), root);
+        assert_eq!(tree.root().children().len(), 2);
+        assert!(matches!(
+            &tree.root().children()[0],
+            FileTreeNode::File { path, .. } if path == &fs::canonicalize(readme).unwrap()
+        ));
+        let FileTreeNode::Directory { children, .. } = &tree.root().children()[1] else {
+            panic!("expected guide directory");
+        };
+        assert!(matches!(&children[0], FileTreeNode::Directory { .. }));
+        assert!(matches!(&children[1], FileTreeNode::File { .. }));
+    }
+
+    #[test]
+    fn rejects_a_path_that_lexically_escapes_the_tree_root() {
+        let directory = TestDirectory::new();
+        let root = directory.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        let escaped_path = root.join("nested/../../outside.md");
+
+        let error = FileTree::from_files(&root, vec![escaped_path.clone()]).unwrap_err();
+
+        assert_eq!(error, super::FileTreeError::OutsideRoot(escaped_path));
     }
 }
