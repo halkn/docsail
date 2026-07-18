@@ -91,6 +91,7 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
                     &tree,
                     app.selected_file_index(),
                     app.focus(),
+                    app.preview_scroll(),
                     &document,
                 )
             })

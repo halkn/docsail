@@ -31,6 +31,7 @@ pub fn render(
     tree: &FileTree,
     selected_file_index: usize,
     focus: Focus,
+    preview_scroll: usize,
     document: &Document,
 ) {
     let layout = two_pane_layout(frame.area());
@@ -41,10 +42,22 @@ pub fn render(
         selected_file_index,
         focus == Focus::FileTree,
     );
-    render_preview(frame, layout.preview, focus == Focus::Preview, document);
+    render_preview(
+        frame,
+        layout.preview,
+        preview_scroll,
+        focus == Focus::Preview,
+        document,
+    );
 }
 
-fn render_preview(frame: &mut Frame<'_>, area: Rect, is_focused: bool, document: &Document) {
+fn render_preview(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    preview_scroll: usize,
+    is_focused: bool,
+    document: &Document,
+) {
     let width = usize::from(area.width.saturating_sub(2));
     let lines = document
         .blocks()
@@ -67,9 +80,15 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, is_focused: bool, document:
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(pane_block("Preview", is_focused)),
+        Paragraph::new(lines)
+            .scroll((preview_scroll_offset(preview_scroll), 0))
+            .block(pane_block("Preview", is_focused)),
         area,
     );
+}
+
+fn preview_scroll_offset(scroll: usize) -> u16 {
+    u16::try_from(scroll).unwrap_or(u16::MAX)
 }
 
 fn wrap_unicode(text: &str, width: usize) -> Vec<String> {
@@ -228,7 +247,7 @@ fn append_tree_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{file_tree_rows, two_pane_layout, wrap_unicode};
+    use super::{file_tree_rows, preview_scroll_offset, two_pane_layout, wrap_unicode};
     use crate::workspace::FileTree;
     use ratatui::layout::Rect;
     use std::path::PathBuf;
@@ -269,6 +288,12 @@ mod tests {
         assert_eq!(rows[1].label, "▾ guide/");
         assert_eq!(rows[2].label, "    setup.md");
         assert!(rows[2].is_selected);
+    }
+
+    #[test]
+    fn clamps_preview_scroll_to_the_terminal_coordinate_range() {
+        assert_eq!(preview_scroll_offset(12), 12);
+        assert_eq!(preview_scroll_offset(usize::MAX), u16::MAX);
     }
 
     #[test]
