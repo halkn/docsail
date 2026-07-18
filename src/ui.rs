@@ -42,7 +42,13 @@ pub fn render(
         selected_file_index,
         focus == Focus::FileTree,
     );
-    render_preview(frame, layout.preview, preview_scroll, focus == Focus::Preview, document);
+    render_preview(
+        frame,
+        layout.preview,
+        preview_scroll,
+        focus == Focus::Preview,
+        document,
+    );
 }
 
 fn render_preview(
