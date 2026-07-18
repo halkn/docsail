@@ -214,6 +214,7 @@ dependencies = [
  "ignore",
  "pulldown-cmark",
  "ratatui",
+ "unicode-width",
 ]
 
 [[package]]

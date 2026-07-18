@@ -67,17 +67,34 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let current_directory = env::current_dir()?;
     let workspace = workspace::resolve(path.as_deref(), &current_directory)?;
     let markdown_files = workspace::discover_markdown_files(&workspace)?;
-    let tree = workspace::FileTree::from_files(&workspace.tree_root(), markdown_files)?;
+    let mut tree = workspace::FileTree::from_files(&workspace.tree_root(), markdown_files)?;
     let mut terminal = terminal::TerminalSession::enter()?;
     let mut app = app::App::new();
     app.set_file_count(tree.file_count());
     let mut event_source = event::CrosstermEventSource;
 
     let run_result = event::run(&mut app, &mut event_source, |app| {
+        if let Ok(files) = workspace::discover_markdown_files(&workspace)
+            && let Ok(refreshed_tree) =
+                workspace::FileTree::from_files(&workspace.tree_root(), files)
+            && refreshed_tree != tree
+        {
+            tree = refreshed_tree;
+            app.set_file_count(tree.file_count());
+        }
         let document = selected_document(&tree, app.selected_file_index())?;
         terminal
             .terminal_mut()
-            .draw(|frame| ui::render(frame, &tree, app.selected_file_index(), &document))
+            .draw(|frame| {
+                ui::render(
+                    frame,
+                    &tree,
+                    app.selected_file_index(),
+                    app.focus(),
+                    app.preview_scroll(),
+                    &document,
+                )
+            })
             .map(|_| ())
     });
     let restore_result = terminal.restore();
