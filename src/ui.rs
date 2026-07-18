@@ -45,6 +45,7 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
                 Style::default().add_modifier(Modifier::BOLD),
             ))),
             MarkdownBlock::Paragraph(content) => Some(Line::from(inline_text(content))),
+            MarkdownBlock::Table { header, rows } => Some(Line::from(table_text(header, rows))),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -52,6 +53,22 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Preview")),
         area,
     );
+}
+
+fn table_text(header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
+    std::iter::once(header)
+        .chain(rows.iter().map(Vec::as_slice))
+        .map(|row| {
+            format!(
+                "| {} |",
+                row.iter()
+                    .map(|cell| inline_text(cell))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn heading_marker(level: HeadingLevel) -> &'static str {
