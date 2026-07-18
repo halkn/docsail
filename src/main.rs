@@ -2,6 +2,7 @@ use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
 
 pub mod app;
 pub mod event;
+pub mod markdown;
 pub mod terminal;
 pub mod ui;
 pub mod workspace;
