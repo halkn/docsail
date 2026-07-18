@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::{
+    app::Focus,
     markdown::{Block as MarkdownBlock, Document, HeadingLevel, Inline},
     workspace::{FileTree, FileTreeNode},
 };
@@ -28,14 +29,21 @@ pub fn render(
     frame: &mut Frame<'_>,
     tree: &FileTree,
     selected_file_index: usize,
+    focus: Focus,
     document: &Document,
 ) {
     let layout = two_pane_layout(frame.area());
-    render_file_tree(frame, layout.file_tree, tree, selected_file_index);
-    render_preview(frame, layout.preview, document);
+    render_file_tree(
+        frame,
+        layout.file_tree,
+        tree,
+        selected_file_index,
+        focus == Focus::FileTree,
+    );
+    render_preview(frame, layout.preview, focus == Focus::Preview, document);
 }
 
-fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
+fn render_preview(frame: &mut Frame<'_>, area: Rect, is_focused: bool, document: &Document) {
     let lines = document
         .blocks()
         .iter()
@@ -50,7 +58,7 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Preview")),
+        Paragraph::new(lines).block(pane_block("Preview", is_focused)),
         area,
     );
 }
@@ -100,6 +108,7 @@ fn render_file_tree(
     area: Rect,
     tree: &FileTree,
     selected_file_index: usize,
+    is_focused: bool,
 ) {
     let rows = file_tree_rows(tree, selected_file_index);
     let lines = rows
@@ -107,9 +116,21 @@ fn render_file_tree(
         .map(FileTreeRow::into_line)
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Files")),
+        Paragraph::new(lines).block(pane_block("Files", is_focused)),
         area,
     );
+}
+
+fn pane_block(title: &str, is_focused: bool) -> Block<'_> {
+    let style = if is_focused {
+        Style::default().fg(ratatui::style::Color::Cyan)
+    } else {
+        Style::default()
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(style)
 }
 
 #[derive(Debug, PartialEq, Eq)]
