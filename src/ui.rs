@@ -45,6 +45,11 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
                 Style::default().add_modifier(Modifier::BOLD),
             ))),
             MarkdownBlock::Paragraph(content) => Some(Line::from(inline_text(content))),
+            MarkdownBlock::CodeBlock { language, content } => Some(Line::from(format!(
+                "```{}\n{}\n```",
+                language.as_deref().unwrap_or(""),
+                content
+            ))),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -68,8 +73,11 @@ fn heading_marker(level: HeadingLevel) -> &'static str {
 fn inline_text(inlines: &[Inline]) -> String {
     inlines.iter().fold(String::new(), |mut text, inline| {
         match inline {
-            Inline::Text(value) | Inline::Code(value) | Inline::Autolink(value) => {
-                text.push_str(value)
+            Inline::Text(value) | Inline::Autolink(value) => text.push_str(value),
+            Inline::Code(value) => {
+                text.push('`');
+                text.push_str(value);
+                text.push('`');
             }
             Inline::SoftBreak | Inline::HardBreak => text.push('\n'),
             _ => {}

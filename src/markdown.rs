@@ -1,4 +1,6 @@
-use pulldown_cmark::{Event, HeadingLevel as ParserHeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    CodeBlockKind, Event, HeadingLevel as ParserHeadingLevel, Parser, Tag, TagEnd,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Document {
@@ -18,6 +20,7 @@ impl Document {
 pub fn parse(source: &str) -> Document {
     let mut blocks = Vec::new();
     let mut active_block = None;
+    let mut code_block = None;
 
     for event in Parser::new(source) {
         match event {
@@ -40,7 +43,27 @@ pub fn parse(source: &str) -> Document {
                     blocks.push(Block::Paragraph(content));
                 }
             }
-            Event::Text(text) => push_inline(&mut active_block, Inline::Text(text.into_string())),
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let language = match kind {
+                    CodeBlockKind::Fenced(language) if !language.is_empty() => {
+                        Some(language.into_string())
+                    }
+                    _ => None,
+                };
+                code_block = Some((language, String::new()));
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some((language, content)) = code_block.take() {
+                    blocks.push(Block::CodeBlock { language, content });
+                }
+            }
+            Event::Text(text) => {
+                if let Some((_, content)) = &mut code_block {
+                    content.push_str(&text);
+                } else {
+                    push_inline(&mut active_block, Inline::Text(text.into_string()));
+                }
+            }
             Event::Code(code) => push_inline(&mut active_block, Inline::Code(code.into_string())),
             Event::SoftBreak => push_inline(&mut active_block, Inline::SoftBreak),
             Event::HardBreak => push_inline(&mut active_block, Inline::HardBreak),
@@ -155,6 +178,17 @@ mod tests {
                 },
                 Block::Paragraph(vec![Inline::Text("A terminal Markdown viewer.".to_owned())]),
             ]
+        );
+    }
+
+    #[test]
+    fn parses_inline_and_fenced_code() {
+        let document = parse("Use `cargo test`.\n\n```rust\nfn main() {}\n```");
+        assert!(
+            matches!(&document.blocks()[0], Block::Paragraph(content) if matches!(content[1], Inline::Code(_)))
+        );
+        assert!(
+            matches!(&document.blocks()[1], Block::CodeBlock { language: Some(language), content } if language == "rust" && content.contains("fn main"))
         );
     }
 
