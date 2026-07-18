@@ -45,6 +45,46 @@ fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
                 Style::default().add_modifier(Modifier::BOLD),
             ))),
             MarkdownBlock::Paragraph(content) => Some(Line::from(inline_text(content))),
+            MarkdownBlock::List { ordered, items } => Some(Line::from(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        let marker = item
+                            .task
+                            .map(|done| if done { "[x] " } else { "[ ] " })
+                            .unwrap_or("");
+                        let prefix = if *ordered {
+                            format!("{}. ", index + 1)
+                        } else {
+                            "- ".to_owned()
+                        };
+                        format!(
+                            "{prefix}{marker}{}",
+                            item.blocks
+                                .iter()
+                                .filter_map(|block| match block {
+                                    MarkdownBlock::Paragraph(content) => Some(inline_text(content)),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )),
+            MarkdownBlock::BlockQuote(blocks) => Some(Line::from(format!(
+                "> {}",
+                blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        MarkdownBlock::Paragraph(content) => Some(inline_text(content)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ))),
             _ => None,
         })
         .collect::<Vec<_>>();
