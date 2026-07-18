@@ -149,6 +149,22 @@ fn inline_text(inlines: &[Inline]) -> String {
             Inline::Text(value) | Inline::Code(value) | Inline::Autolink(value) => {
                 text.push_str(value)
             }
+            Inline::Link {
+                content,
+                destination,
+            } => {
+                text.push_str(&inline_text(content));
+                text.push_str(" (");
+                text.push_str(destination);
+                text.push(')');
+            }
+            Inline::Image { alt, destination } => {
+                text.push_str("[image: ");
+                text.push_str(&inline_text(alt));
+                text.push_str(" (");
+                text.push_str(destination);
+                text.push_str(")]");
+            }
             Inline::SoftBreak | Inline::HardBreak => text.push('\n'),
             _ => {}
         }

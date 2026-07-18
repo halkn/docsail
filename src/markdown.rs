@@ -19,12 +19,36 @@ pub fn parse(source: &str) -> Document {
     let mut blocks = Vec::new();
     let mut active_block = None;
     let mut table = None;
+    let mut inline_spans = Vec::new();
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
 
     for event in Parser::new_ext(source, options) {
         match event {
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                if let Some(content) = active_content(&mut active_block, &mut table) {
+                    inline_spans.push(InlineSpan::Link {
+                        start: content.len(),
+                        destination: dest_url.into_string(),
+                    });
+                }
+            }
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                if let Some(content) = active_content(&mut active_block, &mut table) {
+                    inline_spans.push(InlineSpan::Image {
+                        start: content.len(),
+                        destination: dest_url.into_string(),
+                    });
+                }
+            }
+            Event::End(TagEnd::Link) | Event::End(TagEnd::Image) => {
+                if let Some(span) = inline_spans.pop()
+                    && let Some(content) = active_content(&mut active_block, &mut table)
+                {
+                    span.wrap(content);
+                }
+            }
             Event::Start(Tag::Table(_)) => table = Some(TableContext::default()),
             Event::Start(Tag::TableHead) => {
                 if let Some(table) = &mut table {
@@ -111,6 +135,48 @@ pub fn parse(source: &str) -> Document {
     }
 
     Document::new(blocks)
+}
+
+enum InlineSpan {
+    Link { start: usize, destination: String },
+    Image { start: usize, destination: String },
+}
+impl InlineSpan {
+    fn wrap(self, content: &mut Vec<Inline>) {
+        let (start, destination, image) = match self {
+            Self::Link { start, destination } => (start, destination, false),
+            Self::Image { start, destination } => (start, destination, true),
+        };
+        let nested = content.split_off(start);
+        content.push(if image {
+            Inline::Image {
+                alt: nested,
+                destination,
+            }
+        } else {
+            Inline::Link {
+                content: nested,
+                destination,
+            }
+        });
+    }
+}
+
+fn active_content<'a>(
+    active_block: &'a mut Option<ActiveBlock>,
+    table: &'a mut Option<TableContext>,
+) -> Option<&'a mut Vec<Inline>> {
+    if let Some(table) = table.as_mut()
+        && let Some(cell) = table.current_cell.as_mut()
+    {
+        return Some(cell);
+    }
+    match active_block {
+        Some(ActiveBlock::Heading { content, .. }) | Some(ActiveBlock::Paragraph(content)) => {
+            Some(content)
+        }
+        None => None,
+    }
 }
 
 #[derive(Default)]
@@ -230,10 +296,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_links_and_images() {
+        let document = parse("[DocSail](https://example.invalid) ![Logo](logo.png)");
+        assert!(
+            matches!(&document.blocks()[0], Block::Paragraph(content) if matches!(content[0], Inline::Link { .. }) && matches!(content[2], Inline::Image { .. }))
+        );
+    }
+
+    #[test]
     fn parses_gfm_tables() {
         let document = parse("| Name | Value |\n| --- | --- |\n| DocSail | TUI |");
         assert!(
             matches!(&document.blocks()[0], Block::Table { header, rows } if header.len() == 2 && rows.len() == 1)
+        );
+    }
+
+    #[test]
+    fn parses_links_and_images_in_table_cells() {
+        let document =
+            parse("| [DocSail](https://example.invalid) | ![Logo](logo.png) |\n| --- | --- |");
+
+        assert!(
+            matches!(&document.blocks()[0], Block::Table { header, .. } if matches!(header[0][0], Inline::Link { .. }) && matches!(header[1][0], Inline::Image { .. }))
         );
     }
 
