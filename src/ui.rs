@@ -68,6 +68,10 @@ fn render_preview(
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             MarkdownBlock::Paragraph(content) => Some((inline_text(content), Style::default())),
+            MarkdownBlock::CodeBlock { language, content } => Some((
+                format!("```{}\n{}\n```", language.as_deref().unwrap_or(""), content),
+                Style::default(),
+            )),
             MarkdownBlock::List { ordered, items } => Some((
                 items
                     .iter()
@@ -190,8 +194,11 @@ fn heading_marker(level: HeadingLevel) -> &'static str {
 fn inline_text(inlines: &[Inline]) -> String {
     inlines.iter().fold(String::new(), |mut text, inline| {
         match inline {
-            Inline::Text(value) | Inline::Code(value) | Inline::Autolink(value) => {
-                text.push_str(value)
+            Inline::Text(value) | Inline::Autolink(value) => text.push_str(value),
+            Inline::Code(value) => {
+                text.push('`');
+                text.push_str(value);
+                text.push('`');
             }
             Inline::Link {
                 content,
