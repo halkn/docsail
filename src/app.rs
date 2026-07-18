@@ -12,6 +12,8 @@ pub enum AppEvent {
     Activate,
     ToggleFocus,
     Reload,
+    Resize,
+    Tick,
     Quit,
 }
 
@@ -84,6 +86,8 @@ impl App {
             AppEvent::Activate => self.activation_requested = true,
             AppEvent::ToggleFocus => self.toggle_focus(),
             AppEvent::Reload => self.reload_requested = true,
+            AppEvent::Resize => {}
+            AppEvent::Tick => {}
             AppEvent::Quit => self.is_running = false,
         }
     }
@@ -91,11 +95,15 @@ impl App {
     fn move_down(&mut self) {
         match self.focus {
             Focus::FileTree => {
+                let previous_selection = self.selected_file_index;
                 if self.file_count > 0 {
                     self.selected_file_index = self
                         .selected_file_index
                         .saturating_add(1)
                         .min(self.file_count.saturating_sub(1));
+                }
+                if self.selected_file_index != previous_selection {
+                    self.preview_scroll = 0;
                 }
             }
             Focus::Preview => self.preview_scroll = self.preview_scroll.saturating_add(1),
@@ -105,7 +113,11 @@ impl App {
     fn move_up(&mut self) {
         match self.focus {
             Focus::FileTree => {
-                self.selected_file_index = self.selected_file_index.saturating_sub(1)
+                let previous_selection = self.selected_file_index;
+                self.selected_file_index = self.selected_file_index.saturating_sub(1);
+                if self.selected_file_index != previous_selection {
+                    self.preview_scroll = 0;
+                }
             }
             Focus::Preview => self.preview_scroll = self.preview_scroll.saturating_sub(1),
         }
@@ -155,6 +167,20 @@ mod tests {
         app.update(AppEvent::MoveDown);
 
         assert_eq!(app.selected_file_index(), 0);
+    }
+
+    #[test]
+    fn resets_preview_scroll_after_selecting_another_file() {
+        let mut app = App::new();
+        app.set_file_count(2);
+        app.update(AppEvent::ToggleFocus);
+        app.update(AppEvent::MoveDown);
+        app.update(AppEvent::ToggleFocus);
+
+        app.update(AppEvent::MoveDown);
+
+        assert_eq!(app.selected_file_index(), 1);
+        assert_eq!(app.preview_scroll(), 0);
     }
 
     #[test]
