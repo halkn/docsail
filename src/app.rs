@@ -13,6 +13,7 @@ pub enum AppEvent {
     ToggleFocus,
     Reload,
     Resize,
+    Tick,
     Quit,
 }
 
@@ -86,6 +87,7 @@ impl App {
             AppEvent::ToggleFocus => self.toggle_focus(),
             AppEvent::Reload => self.reload_requested = true,
             AppEvent::Resize => {}
+            AppEvent::Tick => {}
             AppEvent::Quit => self.is_running = false,
         }
     }
