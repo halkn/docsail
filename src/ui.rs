@@ -6,7 +6,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::workspace::{FileTree, FileTreeNode};
+use crate::{
+    markdown::{Block as MarkdownBlock, Document, HeadingLevel, Inline},
+    workspace::{FileTree, FileTreeNode},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TwoPaneLayout {
@@ -21,13 +24,58 @@ pub fn two_pane_layout(area: Rect) -> TwoPaneLayout {
     TwoPaneLayout { file_tree, preview }
 }
 
-pub fn render(frame: &mut Frame<'_>, tree: &FileTree, selected_file_index: usize) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    tree: &FileTree,
+    selected_file_index: usize,
+    document: &Document,
+) {
     let layout = two_pane_layout(frame.area());
     render_file_tree(frame, layout.file_tree, tree, selected_file_index);
+    render_preview(frame, layout.preview, document);
+}
+
+fn render_preview(frame: &mut Frame<'_>, area: Rect, document: &Document) {
+    let lines = document
+        .blocks()
+        .iter()
+        .filter_map(|block| match block {
+            MarkdownBlock::Heading { level, content } => Some(Line::from(Span::styled(
+                format!("{} {}", heading_marker(*level), inline_text(content)),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))),
+            MarkdownBlock::Paragraph(content) => Some(Line::from(inline_text(content))),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Block::default().borders(Borders::ALL).title("Preview"),
-        layout.preview,
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Preview")),
+        area,
     );
+}
+
+fn heading_marker(level: HeadingLevel) -> &'static str {
+    match level {
+        HeadingLevel::One => "#",
+        HeadingLevel::Two => "##",
+        HeadingLevel::Three => "###",
+        HeadingLevel::Four => "####",
+        HeadingLevel::Five => "#####",
+        HeadingLevel::Six => "######",
+    }
+}
+
+fn inline_text(inlines: &[Inline]) -> String {
+    inlines.iter().fold(String::new(), |mut text, inline| {
+        match inline {
+            Inline::Text(value) | Inline::Code(value) | Inline::Autolink(value) => {
+                text.push_str(value)
+            }
+            Inline::SoftBreak | Inline::HardBreak => text.push('\n'),
+            _ => {}
+        }
+        text
+    })
 }
 
 fn render_file_tree(

@@ -1,4 +1,4 @@
-use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
+use std::{env, ffi::OsString, fs, io, path::PathBuf, process::ExitCode};
 
 pub mod app;
 pub mod event;
@@ -74,14 +74,29 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let mut event_source = event::CrosstermEventSource;
 
     let run_result = event::run(&mut app, &mut event_source, |app| {
+        let document = selected_document(&tree, app.selected_file_index())?;
         terminal
             .terminal_mut()
-            .draw(|frame| ui::render(frame, &tree, app.selected_file_index()))
+            .draw(|frame| ui::render(frame, &tree, app.selected_file_index(), &document))
             .map(|_| ())
     });
     let restore_result = terminal.restore();
 
     Ok(run_result.and(restore_result)?)
+}
+
+fn selected_document(
+    tree: &workspace::FileTree,
+    selected_file_index: usize,
+) -> io::Result<markdown::Document> {
+    tree.file_at(selected_file_index)
+        .map(fs::read_to_string)
+        .transpose()
+        .map(|source| {
+            source.map_or_else(markdown::Document::default, |source| {
+                markdown::parse(&source)
+            })
+        })
 }
 
 #[cfg(test)]

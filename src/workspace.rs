@@ -75,12 +75,29 @@ impl FileTree {
     pub fn file_count(&self) -> usize {
         file_count(&self.root)
     }
+
+    pub fn file_at(&self, index: usize) -> Option<&Path> {
+        file_at(&self.root, index, &mut 0)
+    }
 }
 
 fn file_count(node: &FileTreeNode) -> usize {
     match node {
         FileTreeNode::Directory { children, .. } => children.iter().map(file_count).sum(),
         FileTreeNode::File { .. } => 1,
+    }
+}
+
+fn file_at<'a>(node: &'a FileTreeNode, index: usize, current: &mut usize) -> Option<&'a Path> {
+    match node {
+        FileTreeNode::Directory { children, .. } => children
+            .iter()
+            .find_map(|child| file_at(child, index, current)),
+        FileTreeNode::File { path, .. } if *current == index => Some(path),
+        FileTreeNode::File { .. } => {
+            *current += 1;
+            None
+        }
     }
 }
 
@@ -535,6 +552,10 @@ mod tests {
 
         assert_eq!(tree.root().path(), root);
         assert_eq!(tree.file_count(), 3);
+        assert_eq!(
+            tree.file_at(0),
+            Some(fs::canonicalize(&readme).unwrap().as_path())
+        );
         assert_eq!(tree.root().children().len(), 2);
         assert!(matches!(
             &tree.root().children()[0],
