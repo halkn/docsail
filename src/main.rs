@@ -3,6 +3,7 @@ use std::{env, ffi::OsString, path::PathBuf, process::ExitCode};
 pub mod app;
 pub mod event;
 pub mod terminal;
+pub mod workspace;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -60,7 +61,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(_path: Option<PathBuf>) -> std::io::Result<()> {
+fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let current_directory = env::current_dir()?;
+    let _workspace = workspace::resolve(path.as_deref(), &current_directory)?;
     let mut terminal = terminal::TerminalSession::enter()?;
     let mut app = app::App::new();
     let mut event_source = event::CrosstermEventSource;
@@ -70,7 +73,7 @@ fn run(_path: Option<PathBuf>) -> std::io::Result<()> {
     });
     let restore_result = terminal.restore();
 
-    run_result.and(restore_result)
+    Ok(run_result.and(restore_result)?)
 }
 
 #[cfg(test)]
