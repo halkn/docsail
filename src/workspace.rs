@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ignore::WalkBuilder;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum WorkspaceTarget {
     File(PathBuf),
@@ -21,7 +23,14 @@ impl WorkspaceTarget {
 pub enum WorkspaceError {
     NotFound(PathBuf),
     Unsupported(PathBuf),
-    Io { path: PathBuf, source: io::Error },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
+    Walk {
+        path: PathBuf,
+        source: ignore::Error,
+    },
 }
 
 impl fmt::Display for WorkspaceError {
@@ -36,6 +45,9 @@ impl fmt::Display for WorkspaceError {
             Self::Io { path, source } => {
                 write!(formatter, "could not inspect {}: {source}", path.display())
             }
+            Self::Walk { path, source } => {
+                write!(formatter, "could not walk {}: {source}", path.display())
+            }
         }
     }
 }
@@ -44,6 +56,7 @@ impl std::error::Error for WorkspaceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::Walk { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -77,47 +90,35 @@ pub fn discover_markdown_files(target: &WorkspaceTarget) -> Result<Vec<PathBuf>,
             .into_iter()
             .collect()),
         WorkspaceTarget::Directory(path) => {
-            let mut files = Vec::new();
-            collect_markdown_files(path, &mut files)?;
+            let mut files = WalkBuilder::new(path)
+                .hidden(false)
+                .ignore(false)
+                .git_ignore(true)
+                .git_global(false)
+                .git_exclude(false)
+                .require_git(false)
+                .follow_links(false)
+                .build()
+                .map(|entry| {
+                    entry.map_err(|source| WorkspaceError::Walk {
+                        path: path.clone(),
+                        source,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|entry| {
+                    entry
+                        .file_type()
+                        .is_some_and(|file_type| file_type.is_file())
+                })
+                .map(|entry| entry.into_path())
+                .filter(|path| is_markdown_file(path))
+                .collect::<Vec<_>>();
             files.sort();
             Ok(files)
         }
     }
-}
-
-fn collect_markdown_files(
-    directory: &Path,
-    files: &mut Vec<PathBuf>,
-) -> Result<(), WorkspaceError> {
-    let entries = fs::read_dir(directory).map_err(|source| WorkspaceError::Io {
-        path: directory.to_path_buf(),
-        source,
-    })?;
-    let mut entries = entries
-        .map(|entry| {
-            entry.map_err(|source| WorkspaceError::Io {
-                path: directory.to_path_buf(),
-                source,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|entry| entry.path());
-
-    for entry in entries {
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| WorkspaceError::Io {
-            path: path.clone(),
-            source,
-        })?;
-
-        if file_type.is_dir() {
-            collect_markdown_files(&path, files)?;
-        } else if file_type.is_file() && is_markdown_file(&path) {
-            files.push(path);
-        }
-    }
-
-    Ok(())
 }
 
 fn is_markdown_file(path: &Path) -> bool {
@@ -283,5 +284,55 @@ mod tests {
                 .unwrap();
 
         assert_eq!(files, vec![fs::canonicalize(file).unwrap()]);
+    }
+
+    #[test]
+    fn applies_gitignore_rules_during_discovery() {
+        let directory = TestDirectory::new();
+        let ignored_directory = directory.path().join("generated");
+        fs::create_dir(&ignored_directory).unwrap();
+        fs::write(
+            directory.path().join(".gitignore"),
+            "generated/\n*.generated.md\n!keep.generated.md\n",
+        )
+        .unwrap();
+        fs::write(directory.path().join("included.md"), "# Included").unwrap();
+        fs::write(ignored_directory.join("hidden.md"), "# Hidden").unwrap();
+        fs::write(directory.path().join("ignored.generated.md"), "# Ignored").unwrap();
+        fs::write(directory.path().join("keep.generated.md"), "# Kept").unwrap();
+
+        let files = discover_markdown_files(&WorkspaceTarget::Directory(
+            fs::canonicalize(directory.path()).unwrap(),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            files,
+            vec![
+                fs::canonicalize(directory.path().join("included.md")).unwrap(),
+                fs::canonicalize(directory.path().join("keep.generated.md")).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn applies_a_repository_gitignore_when_the_workspace_is_a_docs_subdirectory() {
+        let directory = TestDirectory::new();
+        let docs = directory.path().join("docs");
+        let generated = docs.join("generated");
+        fs::create_dir_all(&generated).unwrap();
+        fs::write(directory.path().join(".gitignore"), "docs/generated/\n").unwrap();
+        fs::write(docs.join("included.md"), "# Included").unwrap();
+        fs::write(generated.join("hidden.md"), "# Hidden").unwrap();
+
+        let files = discover_markdown_files(&WorkspaceTarget::Directory(
+            fs::canonicalize(&docs).unwrap(),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            files,
+            vec![fs::canonicalize(docs.join("included.md")).unwrap()]
+        );
     }
 }
