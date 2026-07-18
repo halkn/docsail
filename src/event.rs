@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, time::Duration};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 
@@ -13,6 +13,9 @@ pub struct CrosstermEventSource;
 impl EventSource for CrosstermEventSource {
     fn next_event(&mut self) -> io::Result<AppEvent> {
         loop {
+            if !event::poll(Duration::from_millis(250))? {
+                return Ok(AppEvent::Tick);
+            }
             if let Some(event) = translate_event(event::read()?) {
                 return Ok(event);
             }
@@ -23,7 +26,7 @@ impl EventSource for CrosstermEventSource {
 pub fn run<S, D>(app: &mut App, event_source: &mut S, mut draw: D) -> io::Result<()>
 where
     S: EventSource,
-    D: FnMut(&App) -> io::Result<()>,
+    D: FnMut(&mut App) -> io::Result<()>,
 {
     draw(app)?;
 
@@ -137,5 +140,20 @@ mod tests {
 
         assert_eq!(draw_count, 3);
         assert_eq!(app.selected_file_index(), 1);
+    }
+
+    #[test]
+    fn redraws_after_a_tick() {
+        let mut app = App::new();
+        let mut event_source = FakeEventSource {
+            events: VecDeque::from([AppEvent::Tick, AppEvent::Quit]),
+        };
+        let mut draw_count = 0;
+        run(&mut app, &mut event_source, |_| {
+            draw_count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(draw_count, 2);
     }
 }
