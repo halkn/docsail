@@ -39,15 +39,15 @@ where
 }
 
 fn translate_event(event: Event) -> Option<AppEvent> {
-    let Event::Key(key_event) = event else {
-        return None;
-    };
-
-    if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-        return None;
+    match event {
+        Event::Key(key_event)
+            if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+        {
+            translate_key(key_event)
+        }
+        Event::Resize(_, _) => Some(AppEvent::Resize),
+        _ => None,
     }
-
-    translate_key(key_event)
 }
 
 fn translate_key(key_event: KeyEvent) -> Option<AppEvent> {
@@ -114,10 +114,18 @@ mod tests {
     }
 
     #[test]
+    fn translates_terminal_resize_events() {
+        assert_eq!(
+            translate_event(Event::Resize(120, 40)),
+            Some(AppEvent::Resize)
+        );
+    }
+
+    #[test]
     fn draws_until_the_quit_event() {
         let mut app = App::new();
         let mut event_source = FakeEventSource {
-            events: VecDeque::from([AppEvent::MoveDown, AppEvent::Quit]),
+            events: VecDeque::from([AppEvent::Resize, AppEvent::MoveDown, AppEvent::Quit]),
         };
         let mut draw_count = 0;
 
@@ -127,7 +135,7 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(draw_count, 2);
+        assert_eq!(draw_count, 3);
         assert_eq!(app.selected_file_index(), 1);
     }
 }
