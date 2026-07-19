@@ -77,8 +77,8 @@ HTML block もリテラルとして表示します。
 
 次の裸 URL とメールアドレスは、現在は通常テキストとして表示されます。
 
-https://example.com/bare-url
+<https://example.com/bare-url>
 
-www.example.com
+<https://www.example.com>
 
-hello@example.com
+<hello@example.com>
