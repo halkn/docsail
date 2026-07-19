@@ -1,15 +1,15 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::Focus,
-    markdown::{Block as MarkdownBlock, Document, HeadingLevel, Inline},
+    markdown::{Block as MarkdownBlock, Document, HeadingLevel, Inline, TableAlignment},
     workspace::{FileTree, FileTreeNode},
 };
 
@@ -58,183 +58,315 @@ fn render_preview(
     is_focused: bool,
     document: &Document,
 ) {
-    let width = usize::from(area.width.saturating_sub(2));
-    let lines = document
-        .blocks()
-        .iter()
-        .map(|block| match block {
-            MarkdownBlock::Heading { level, content } => (
-                format!("{} {}", heading_marker(*level), inline_text(content)),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            MarkdownBlock::Paragraph(content) => (inline_text(content), Style::default()),
-            MarkdownBlock::CodeBlock { language, content } => (
-                format!("```{}\n{}\n```", language.as_deref().unwrap_or(""), content),
-                Style::default(),
-            ),
-            MarkdownBlock::List { ordered, items } => (
-                items
-                    .iter()
-                    .enumerate()
-                    .map(|(index, item)| {
-                        let marker = item
-                            .task
-                            .map(|done| if done { "[x] " } else { "[ ] " })
-                            .unwrap_or("");
-                        let prefix = if *ordered {
-                            format!("{}. ", index + 1)
-                        } else {
-                            "- ".to_owned()
-                        };
-                        format!(
-                            "{prefix}{marker}{}",
-                            item.blocks
-                                .iter()
-                                .filter_map(|block| match block {
-                                    MarkdownBlock::Paragraph(content) => Some(inline_text(content)),
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                Style::default(),
-            ),
-            MarkdownBlock::BlockQuote(blocks) => (
-                format!(
-                    "> {}",
-                    blocks
-                        .iter()
-                        .filter_map(|block| match block {
-                            MarkdownBlock::Paragraph(content) => Some(inline_text(content)),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ),
-                Style::default(),
-            ),
-            MarkdownBlock::Table { header, rows } => (table_text(header, rows), Style::default()),
-            MarkdownBlock::ThematicBreak => ("---".to_owned(), Style::default()),
-        })
-        .flat_map(|(text, style)| {
-            wrap_unicode(&text, width)
-                .into_iter()
-                .map(move |line| Line::from(Span::styled(line, style)))
-        })
-        .collect::<Vec<_>>();
+    let lines = preview_lines(document);
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((preview_scroll_offset(preview_scroll), 0))
+            .wrap(Wrap { trim: false })
             .block(pane_block("Preview", is_focused)),
         area,
     );
+}
+
+fn preview_lines(document: &Document) -> Vec<Line<'static>> {
+    document
+        .blocks()
+        .iter()
+        .enumerate()
+        .flat_map(|(index, block)| {
+            let mut lines = Vec::new();
+            if index > 0 {
+                lines.push(Line::default());
+            }
+            lines.extend(block_lines(block));
+            lines
+        })
+        .collect()
+}
+
+fn block_lines(block: &MarkdownBlock) -> Vec<Line<'static>> {
+    match block {
+        MarkdownBlock::Heading { level, content } => heading_lines(*level, content),
+        MarkdownBlock::Paragraph(content) => inline_lines(content, Style::default()),
+        MarkdownBlock::CodeBlock { language, content } => {
+            let mut lines = Vec::new();
+            if let Some(language) = language {
+                lines.push(Line::from(Span::styled(
+                    language.clone(),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            lines.extend(content.lines().map(|line| {
+                Line::from(Span::styled(
+                    line.to_owned(),
+                    Style::default().fg(Color::Yellow),
+                ))
+            }));
+            lines
+        }
+        MarkdownBlock::List { start, items } => items
+            .iter()
+            .enumerate()
+            .flat_map(|(index, item)| {
+                let prefix = match (start, item.task) {
+                    (_, Some(true)) => "[x] ".to_owned(),
+                    (_, Some(false)) => "[ ] ".to_owned(),
+                    (Some(start), None) => format!("{}. ", start + index as u64),
+                    (None, None) => "• ".to_owned(),
+                };
+                let continuation = " ".repeat(prefix.width());
+                let lines = item.blocks.iter().flat_map(block_lines).collect::<Vec<_>>();
+                lines
+                    .into_iter()
+                    .enumerate()
+                    .map(|(line_index, mut line)| {
+                        line.spans.insert(
+                            0,
+                            Span::raw(if line_index == 0 {
+                                prefix.clone()
+                            } else {
+                                continuation.clone()
+                            }),
+                        );
+                        line
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+        MarkdownBlock::BlockQuote(blocks) => blocks
+            .iter()
+            .flat_map(block_lines)
+            .map(|mut line| {
+                line.spans
+                    .insert(0, Span::styled("│ ", Style::default().fg(Color::DarkGray)));
+                line
+            })
+            .collect(),
+        MarkdownBlock::Table {
+            header,
+            rows,
+            alignments,
+        } => table_lines(header, rows, alignments),
+        MarkdownBlock::ThematicBreak => vec![Line::from(Span::styled(
+            "─".repeat(20),
+            Style::default().fg(Color::DarkGray),
+        ))],
+        MarkdownBlock::Html(html) => vec![Line::from(Span::styled(
+            html.clone(),
+            Style::default().fg(Color::DarkGray),
+        ))],
+    }
+}
+
+fn heading_lines(level: HeadingLevel, content: &[Inline]) -> Vec<Line<'static>> {
+    let color = match level {
+        HeadingLevel::One => Color::Magenta,
+        HeadingLevel::Two => Color::Cyan,
+        HeadingLevel::Three => Color::Green,
+        HeadingLevel::Four => Color::Yellow,
+        HeadingLevel::Five => Color::Blue,
+        HeadingLevel::Six => Color::Gray,
+    };
+    let title_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let mut title = inline_lines(content, title_style);
+
+    match level {
+        HeadingLevel::One => {
+            let width = inline_plain_text(content).width().max(20);
+            let mut lines = vec![Line::from(Span::styled(
+                "═".repeat(width),
+                Style::default().fg(color),
+            ))];
+            lines.append(&mut title);
+            lines.push(Line::from(Span::styled(
+                "═".repeat(width),
+                Style::default().fg(color),
+            )));
+            lines
+        }
+        HeadingLevel::Two => {
+            let width = inline_plain_text(content).width().max(16);
+            title.push(Line::from(Span::styled(
+                "─".repeat(width),
+                Style::default().fg(color),
+            )));
+            title
+        }
+        HeadingLevel::Three => title,
+        HeadingLevel::Four | HeadingLevel::Five | HeadingLevel::Six => {
+            title[0]
+                .spans
+                .insert(0, Span::styled("▸ ", Style::default().fg(color)));
+            title
+        }
+    }
+}
+
+fn inline_lines(inlines: &[Inline], style: Style) -> Vec<Line<'static>> {
+    let mut lines = vec![Vec::new()];
+    for inline in inlines {
+        if matches!(inline, Inline::HardBreak) {
+            lines.push(Vec::new());
+        } else {
+            lines
+                .last_mut()
+                .expect("lines is never empty")
+                .extend(inline_spans(inline, style));
+        }
+    }
+    lines.into_iter().map(Line::from).collect()
+}
+
+fn inline_spans(inline: &Inline, style: Style) -> Vec<Span<'static>> {
+    match inline {
+        Inline::Text(value) => vec![Span::styled(value.clone(), style)],
+        Inline::SoftBreak => vec![Span::styled(" ", style)],
+        Inline::HardBreak => Vec::new(),
+        Inline::Html(value) => vec![Span::styled(
+            value.clone(),
+            Style::default().fg(Color::DarkGray),
+        )],
+        Inline::Code(value) => vec![Span::styled(
+            value.clone(),
+            style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )],
+        Inline::Emphasis(content) => {
+            inline_spans_for(content, style.add_modifier(Modifier::ITALIC))
+        }
+        Inline::Strong(content) => inline_spans_for(content, style.add_modifier(Modifier::BOLD)),
+        Inline::Strikethrough(content) => {
+            inline_spans_for(content, style.add_modifier(Modifier::CROSSED_OUT))
+        }
+        Inline::Link { content, .. } => inline_spans_for(content, link_style(style)),
+        Inline::Autolink(destination) => vec![Span::styled(destination.clone(), link_style(style))],
+        Inline::Image { alt, .. } => {
+            let mut spans = vec![Span::styled(
+                "[image: ",
+                Style::default().fg(Color::DarkGray),
+            )];
+            spans.extend(inline_spans_for(alt, style));
+            spans.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+            spans
+        }
+    }
+}
+
+fn inline_spans_for(inlines: &[Inline], style: Style) -> Vec<Span<'static>> {
+    inlines
+        .iter()
+        .flat_map(|inline| inline_spans(inline, style))
+        .collect()
+}
+
+fn link_style(style: Style) -> Style {
+    style.fg(Color::Blue).add_modifier(Modifier::UNDERLINED)
 }
 
 fn preview_scroll_offset(scroll: usize) -> u16 {
     u16::try_from(scroll).unwrap_or(u16::MAX)
 }
 
-fn wrap_unicode(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
+fn table_lines(
+    header: &[Vec<Inline>],
+    rows: &[Vec<Vec<Inline>>],
+    alignments: &[TableAlignment],
+) -> Vec<Line<'static>> {
+    let column_count = std::iter::once(header.len())
+        .chain(rows.iter().map(Vec::len))
+        .max()
+        .unwrap_or(0);
+    if column_count == 0 {
+        return Vec::new();
     }
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    let mut line_width = 0;
-    for character in text.chars() {
-        if character == '\n' {
-            lines.push(std::mem::take(&mut line));
-            line_width = 0;
-            continue;
-        }
-        let character_width = character.width().unwrap_or(0);
-        if line_width > 0 && line_width + character_width > width {
-            lines.push(std::mem::take(&mut line));
-            line_width = 0;
-        }
-        line.push(character);
-        line_width += character_width;
-    }
-    lines.push(line);
+
+    let all_rows = std::iter::once(header).chain(rows.iter().map(Vec::as_slice));
+    let widths = (0..column_count)
+        .map(|column| {
+            all_rows
+                .clone()
+                .filter_map(|row| row.get(column))
+                .map(|cell| inline_plain_text(cell).width())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+
+    let mut lines = vec![table_border('┌', '┬', '┐', &widths)];
+    lines.push(table_row(header, &widths, alignments, true));
+    lines.push(table_border('├', '┼', '┤', &widths));
+    lines.extend(
+        rows.iter()
+            .map(|row| table_row(row, &widths, alignments, false)),
+    );
+    lines.push(table_border('└', '┴', '┘', &widths));
     lines
 }
 
-fn table_text(header: &[Vec<Inline>], rows: &[Vec<Vec<Inline>>]) -> String {
-    std::iter::once(header)
-        .chain(rows.iter().map(Vec::as_slice))
-        .map(|row| {
-            format!(
-                "| {} |",
-                row.iter()
-                    .map(|cell| inline_text(cell))
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn table_border(left: char, divider: char, right: char, widths: &[usize]) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(
+            "{left}{}{right}",
+            widths
+                .iter()
+                .map(|width| "─".repeat(width + 2))
+                .collect::<Vec<_>>()
+                .join(&divider.to_string())
+        ),
+        Style::default().fg(Color::DarkGray),
+    ))
 }
 
-fn heading_marker(level: HeadingLevel) -> &'static str {
-    match level {
-        HeadingLevel::One => "#",
-        HeadingLevel::Two => "##",
-        HeadingLevel::Three => "###",
-        HeadingLevel::Four => "####",
-        HeadingLevel::Five => "#####",
-        HeadingLevel::Six => "######",
+fn table_row(
+    row: &[Vec<Inline>],
+    widths: &[usize],
+    alignments: &[TableAlignment],
+    is_header: bool,
+) -> Line<'static> {
+    let cell_style = if is_header {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let mut spans = vec![Span::styled("│", Style::default().fg(Color::DarkGray))];
+    for (column, width) in widths.iter().enumerate() {
+        let text = row
+            .get(column)
+            .map_or_else(String::new, |cell| inline_plain_text(cell));
+        let padding = width.saturating_sub(text.width());
+        let (left, right) = match alignments
+            .get(column)
+            .copied()
+            .unwrap_or(TableAlignment::None)
+        {
+            TableAlignment::Right => (padding, 0),
+            TableAlignment::Center => (padding / 2, padding - padding / 2),
+            _ => (0, padding),
+        };
+        spans.push(Span::raw(" ".repeat(left + 1)));
+        spans.push(Span::styled(text, cell_style));
+        spans.push(Span::raw(" ".repeat(right + 1)));
+        spans.push(Span::styled("│", Style::default().fg(Color::DarkGray)));
     }
+    Line::from(spans)
 }
 
-fn inline_text(inlines: &[Inline]) -> String {
+fn inline_plain_text(inlines: &[Inline]) -> String {
     inlines.iter().fold(String::new(), |mut text, inline| {
         match inline {
             Inline::Text(value) => text.push_str(value),
-            Inline::Autolink(value) => {
-                text.push('<');
-                text.push_str(value);
-                text.push('>');
-            }
-            Inline::Code(value) => {
-                text.push('`');
-                text.push_str(value);
-                text.push('`');
-            }
-            Inline::Link {
-                content,
-                destination,
-            } => {
-                text.push_str(&inline_text(content));
-                text.push_str(" (");
-                text.push_str(destination);
-                text.push(')');
-            }
-            Inline::Image { alt, destination } => {
+            Inline::Autolink(value) | Inline::Code(value) => text.push_str(value),
+            Inline::Link { content, .. }
+            | Inline::Emphasis(content)
+            | Inline::Strong(content)
+            | Inline::Strikethrough(content) => text.push_str(&inline_plain_text(content)),
+            Inline::Image { alt, .. } => {
                 text.push_str("[image: ");
-                text.push_str(&inline_text(alt));
-                text.push_str(" (");
-                text.push_str(destination);
-                text.push_str(")]");
+                text.push_str(&inline_plain_text(alt));
+                text.push(']');
             }
-            Inline::Emphasis(content) => {
-                text.push('*');
-                text.push_str(&inline_text(content));
-                text.push('*');
-            }
-            Inline::Strong(content) => {
-                text.push_str("**");
-                text.push_str(&inline_text(content));
-                text.push_str("**");
-            }
-            Inline::Strikethrough(content) => {
-                text.push_str("~~");
-                text.push_str(&inline_text(content));
-                text.push_str("~~");
-            }
-            Inline::SoftBreak | Inline::HardBreak => text.push('\n'),
+            Inline::SoftBreak => text.push(' '),
+            Inline::HardBreak => text.push('\n'),
+            Inline::Html(value) => text.push_str(value),
         }
         text
     })
@@ -331,12 +463,10 @@ fn append_tree_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        file_tree_rows, inline_text, preview_scroll_offset, two_pane_layout, wrap_unicode,
-    };
-    use crate::markdown::Inline;
+    use super::{file_tree_rows, preview_lines, preview_scroll_offset, two_pane_layout};
+    use crate::markdown::parse;
     use crate::workspace::FileTree;
-    use ratatui::layout::Rect;
+    use ratatui::{layout::Rect, style::Color};
     use std::path::PathBuf;
 
     #[test]
@@ -384,25 +514,70 @@ mod tests {
     }
 
     #[test]
-    fn wraps_japanese_text_at_terminal_display_width() {
-        assert_eq!(wrap_unicode("日本語abc", 6), ["日本語", "abc"]);
+    fn renders_markdown_as_a_preview_without_source_markers() {
+        let document = parse(
+            "# Title\n\nfirst line\nsecond line\n\n| Name | Value |\n| --- | --- |\n| DocSail | TUI |",
+        );
+        let lines = preview_lines(&document)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines[0], "════════════════════");
+        assert_eq!(lines[1], "Title");
+        assert_eq!(lines[2], "════════════════════");
+        assert_eq!(lines[4], "first line second line");
+        assert_eq!(lines[6], "┌─────────┬───────┐");
+        assert_eq!(lines[7], "│ Name    │ Value │");
+        assert!(lines.iter().all(|line| !line.starts_with("# ")));
+        assert!(lines.iter().all(|line| !line.starts_with("| ")));
     }
 
     #[test]
-    fn formats_remaining_gfm_inlines() {
-        let inlines = [
-            Inline::Emphasis(vec![Inline::Text("emphasis".to_owned())]),
-            Inline::Text(" ".to_owned()),
-            Inline::Strong(vec![Inline::Text("strong".to_owned())]),
-            Inline::Text(" ".to_owned()),
-            Inline::Strikethrough(vec![Inline::Text("strike".to_owned())]),
-            Inline::Text(" ".to_owned()),
-            Inline::Autolink("https://example.invalid".to_owned()),
-        ];
+    fn renders_unordered_ordered_and_task_lists() {
+        let document = parse("- first\n- second\n\n1. one\n2. two\n\n- [x] done\n- [ ] remaining");
+        let lines = preview_lines(&document)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
 
         assert_eq!(
-            inline_text(&inlines),
-            "*emphasis* **strong** ~~strike~~ <https://example.invalid>"
+            lines,
+            [
+                "• first",
+                "• second",
+                "",
+                "1. one",
+                "2. two",
+                "",
+                "[x] done",
+                "[ ] remaining",
+            ]
         );
+    }
+
+    #[test]
+    fn differentiates_heading_levels_without_markdown_markers() {
+        let document = parse("# One\n\n## Two\n\n### Three\n\n#### Four");
+        let rendered = preview_lines(&document);
+        let lines = rendered.iter().map(line_text).collect::<Vec<_>>();
+
+        assert_eq!(lines[1], "One");
+        assert_eq!(lines[4], "Two");
+        assert_eq!(lines[5], "────────────────");
+        assert_eq!(lines[7], "Three");
+        assert_eq!(lines[9], "▸ Four");
+        assert!(lines.iter().all(|line| !line.starts_with("#")));
+        assert_eq!(rendered[1].spans[0].style.fg, Some(Color::Magenta));
+        assert_eq!(rendered[4].spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(rendered[7].spans[0].style.fg, Some(Color::Green));
+        assert_eq!(rendered[9].spans[0].style.fg, Some(Color::Yellow));
+    }
+
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 }

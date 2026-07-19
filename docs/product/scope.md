@@ -17,10 +17,14 @@
 - 左にファイルツリー、右にプレビューを置く 2 ペイン TUI
 - キーボードによる選択、プレビューのスクロール、ペインのフォーカス切替、再読み込み、終了
 - ファイル変更監視、Terminal resize、終了時の Terminal 状態復元
-- GFM の主要構文（見出し、段落、強調、打消し、リスト、Task List、引用、コード、表、リンク、画像プレースホルダー、水平線、Autolink）
+- GFM の主要構文（見出し、段落、強調、打消し、ネストしたリストと Task List、ネストした引用、コード、表、リンク、画像プレースホルダー、水平線、角括弧付き Autolink）
 - 日本語・Unicode の表示幅と Terminal 幅に応じた折り返し
 
 Mermaid fenced block は通常のコードブロックとして表示する。
+
+HTML は描画せず、リテラルとして表示する。見出しは Terminal で階層を判別できるよう、レベルごとの色と罫線・接頭辞で表示する。
+
+確認用の入力例は [`docs/gfm-preview-test.md`](../gfm-preview-test.md) に置く。
 
 ## v0.1.0 から除外するもの
 
@@ -30,6 +34,11 @@ Mermaid fenced block は通常のコードブロックとして表示する。
 - Azure DevOps Wiki の `.order` および固有構文の対応
 - D2、数式、HTML/CSS の完全再現、Plugin、設定・テーマシステム
 - MkDocs、Docusaurus、Sphinx、GitHub Wiki 固有ナビゲーション、MDX、reStructuredText の個別解釈
+
+## 現在の制限
+
+- GFM の裸 URL、`www.`、メールアドレスによる拡張 Autolink はリンクとして装飾しない。
+- 表セル内ではインライン装飾をプレーンテキストとして表示する。セル内の hard break はサポートしない。
 
 ## 実装上の制約
 
