@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --locked --release
+      - name: Package archive
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          directory="docsail-${version}-${{ matrix.target }}"
+          archive="${directory}.tar.gz"
+          mkdir -p "${directory}"
+          cp target/release/docsail "${directory}/docsail"
+          tar -czf "${archive}" "${directory}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: '*.tar.gz'
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Create checksums
+        working-directory: release
+        run: sha256sum *.tar.gz > SHA256SUMS
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/*.tar.gz release/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" release/*.tar.gz release/SHA256SUMS --generate-notes
+          fi

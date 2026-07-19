@@ -35,6 +35,20 @@ $ docsail README.md
 
 プレビューの確認には [GFM プレビュー確認](docs/gfm-preview-test.md) を利用できます。対応範囲と制限は [スコープ](docs/product/scope.md) を参照してください。
 
+## インストール
+
+GitHub Release で配布するバイナリは、mise の GitHub バックエンドからインストールできます。最新の安定版をグローバルに有効化するには、次を実行します。
+
+```console
+$ mise use -g github:halkn/docsail@latest
+```
+
+特定の版を使う場合は、`latest` をバージョン番号に置き換えます。
+
+```console
+$ mise use -g github:halkn/docsail@0.1.0
+```
+
 ## 開発
 
 Rust の安定版ツールチェーンを用意して、リポジトリ直下で実行します。
