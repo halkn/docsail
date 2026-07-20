@@ -1,6 +1,6 @@
 use std::{io, time::Duration};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::app::{App, AppEvent};
 
@@ -54,13 +54,30 @@ fn translate_event(event: Event) -> Option<AppEvent> {
 }
 
 fn translate_key(key_event: KeyEvent) -> Option<AppEvent> {
+    if key_event.modifiers == KeyModifiers::CONTROL {
+        return match key_event.code {
+            KeyCode::Char('a') => Some(AppEvent::CursorStart),
+            KeyCode::Char('e') => Some(AppEvent::CursorEnd),
+            KeyCode::Char('b') => Some(AppEvent::CursorLeft),
+            KeyCode::Char('f') => Some(AppEvent::CursorRight),
+            KeyCode::Char('d') => Some(AppEvent::DeleteForward),
+            KeyCode::Char('h') => Some(AppEvent::Backspace),
+            KeyCode::Char('k') => Some(AppEvent::KillToEnd),
+            KeyCode::Char('n') => Some(AppEvent::NextResult),
+            KeyCode::Char('p') => Some(AppEvent::PreviousResult),
+            KeyCode::Char('u') => Some(AppEvent::KillToStart),
+            _ => None,
+        };
+    }
     match key_event.code {
-        KeyCode::Char('j') | KeyCode::Down => Some(AppEvent::MoveDown),
-        KeyCode::Char('k') | KeyCode::Up => Some(AppEvent::MoveUp),
+        KeyCode::Down => Some(AppEvent::MoveDown),
+        KeyCode::Up => Some(AppEvent::MoveUp),
         KeyCode::Enter => Some(AppEvent::Activate),
         KeyCode::Tab => Some(AppEvent::ToggleFocus),
         KeyCode::Char('r') => Some(AppEvent::Reload),
-        KeyCode::Char('q') => Some(AppEvent::Quit),
+        KeyCode::Esc => Some(AppEvent::Escape),
+        KeyCode::Backspace => Some(AppEvent::Backspace),
+        KeyCode::Char(character) => Some(AppEvent::Input(character)),
         _ => None,
     }
 }
@@ -87,20 +104,47 @@ mod tests {
     #[test]
     fn translates_initial_keybindings() {
         let cases = [
-            (KeyCode::Char('j'), AppEvent::MoveDown),
+            (KeyCode::Char('j'), AppEvent::Input('j')),
             (KeyCode::Down, AppEvent::MoveDown),
-            (KeyCode::Char('k'), AppEvent::MoveUp),
+            (KeyCode::Char('k'), AppEvent::Input('k')),
             (KeyCode::Up, AppEvent::MoveUp),
             (KeyCode::Enter, AppEvent::Activate),
             (KeyCode::Tab, AppEvent::ToggleFocus),
             (KeyCode::Char('r'), AppEvent::Reload),
-            (KeyCode::Char('q'), AppEvent::Quit),
+            (KeyCode::Char('q'), AppEvent::Input('q')),
+            (KeyCode::Char('['), AppEvent::Input('[')),
+            (KeyCode::Char(']'), AppEvent::Input(']')),
+            (KeyCode::Char('t'), AppEvent::Input('t')),
+            (KeyCode::Char('f'), AppEvent::Input('f')),
+            (KeyCode::Char('/'), AppEvent::Input('/')),
         ];
 
         for (key_code, expected_event) in cases {
             let key_event = KeyEvent::new(key_code, KeyModifiers::NONE);
 
             assert_eq!(translate_event(Event::Key(key_event)), Some(expected_event));
+        }
+    }
+
+    #[test]
+    fn translates_emacs_style_search_editing_keys() {
+        let cases = [
+            ('a', AppEvent::CursorStart),
+            ('e', AppEvent::CursorEnd),
+            ('b', AppEvent::CursorLeft),
+            ('f', AppEvent::CursorRight),
+            ('d', AppEvent::DeleteForward),
+            ('h', AppEvent::Backspace),
+            ('k', AppEvent::KillToEnd),
+            ('n', AppEvent::NextResult),
+            ('p', AppEvent::PreviousResult),
+            ('u', AppEvent::KillToStart),
+        ];
+
+        for (character, expected) in cases {
+            let key_event = KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL);
+
+            assert_eq!(translate_event(Event::Key(key_event)), Some(expected));
         }
     }
 

@@ -26,12 +26,20 @@ HTML は描画せず、リテラルとして表示する。見出しは Terminal
 
 確認用の入力例は [`docs/gfm-preview-test.md`](../gfm-preview-test.md) に置く。
 
+## v0.2.0 に含めるもの
+
+- 相対 Markdown リンク、GitHub 互換の見出しアンカー、Back / Forward、TOC overlay
+- ファイル名ファジー検索とページ内の大文字小文字を区別しない文字列検索
+- Azure DevOps Wiki の `.order` によるページ順序。未指定ページは末尾の名前順とする
+
+外部 URL の起動、broken link 診断、Azure DevOps Wiki のアラート・タグ等の表示構文は対象外とする。
+
 ## v0.1.0 から除外するもの
 
 - Mermaid 図形描画、Terminal 画像表示、外部 SVG/PNG 変換
 - Git diff、Rendered diff、Git 履歴
-- 全文検索、リンク遷移、Back/Forward、TOC、broken link 診断
-- Azure DevOps Wiki の `.order` および固有構文の対応
+- broken link 診断
+- Azure DevOps Wiki 固有の表示構文の網羅
 - D2、数式、HTML/CSS の完全再現、Plugin、設定・テーマシステム
 - MkDocs、Docusaurus、Sphinx、GitHub Wiki 固有ナビゲーション、MDX、reStructuredText の個別解釈
 
