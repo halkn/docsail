@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    app::Focus,
+    app::{Focus, Overlay},
     markdown::{Block as MarkdownBlock, Document, HeadingLevel, Inline, TableAlignment},
     workspace::{FileTree, FileTreeNode},
 };
@@ -26,29 +26,114 @@ pub fn two_pane_layout(area: Rect) -> TwoPaneLayout {
     TwoPaneLayout { file_tree, preview }
 }
 
-pub fn render(
-    frame: &mut Frame<'_>,
-    tree: &FileTree,
-    selected_file_index: usize,
-    focus: Focus,
-    preview_scroll: usize,
-    document: &Document,
-) {
+pub struct RenderState<'a> {
+    pub selected_file_index: usize,
+    pub focus: Focus,
+    pub preview_scroll: usize,
+    pub document: &'a Document,
+    pub overlay: Option<Overlay>,
+    pub query: &'a str,
+    pub query_cursor: usize,
+    pub overlay_results: &'a [String],
+    pub selected_result: usize,
+}
+
+pub fn render(frame: &mut Frame<'_>, tree: &FileTree, state: RenderState<'_>) {
     let layout = two_pane_layout(frame.area());
     render_file_tree(
         frame,
         layout.file_tree,
         tree,
-        selected_file_index,
-        focus == Focus::FileTree,
+        state.selected_file_index,
+        state.focus == Focus::FileTree,
     );
     render_preview(
         frame,
         layout.preview,
-        preview_scroll,
-        focus == Focus::Preview,
-        document,
+        state.preview_scroll,
+        state.focus == Focus::Preview,
+        state.document,
     );
+    if let Some(overlay) = state.overlay {
+        render_overlay(
+            frame,
+            overlay,
+            state.query,
+            state.query_cursor,
+            state.overlay_results,
+            state.selected_result,
+        );
+    }
+}
+
+pub fn preview_scroll_for_block(document: &Document, block_index: usize) -> usize {
+    document
+        .blocks()
+        .iter()
+        .take(block_index)
+        .map(|block| block_lines(block).len() + 1)
+        .sum()
+}
+
+fn render_overlay(
+    frame: &mut Frame<'_>,
+    overlay: Overlay,
+    query: &str,
+    query_cursor: usize,
+    results: &[String],
+    selected: usize,
+) {
+    let title = match overlay {
+        Overlay::Toc => "Table of Contents",
+        Overlay::FileSearch => "Find file",
+        Overlay::PageSearch => "Find in page",
+    };
+    let area = centered_rect(70, 60, frame.area());
+    frame.render_widget(ratatui::widgets::Clear, area);
+    let mut lines = vec![Line::from(format!("> {query}"))];
+    lines.extend(results.iter().enumerate().map(|(index, result)| {
+        Line::from(Span::styled(
+            result.clone(),
+            if index == selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            },
+        ))
+    }));
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
+        area,
+    );
+    if !matches!(overlay, Overlay::Toc) {
+        let (x, y) = overlay_cursor_position(area, &query[..query_cursor]);
+        frame.set_cursor_position((x, y));
+    }
+}
+
+fn overlay_cursor_position(area: Rect, query: &str) -> (u16, u16) {
+    let input_start = area.x.saturating_add(3);
+    let input_end = area.right().saturating_sub(1);
+    let query_width = u16::try_from(query.width()).unwrap_or(u16::MAX);
+    (
+        input_start.saturating_add(query_width).min(input_end),
+        area.y.saturating_add(1),
+    )
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(vertical[1])[1]
 }
 
 fn render_preview(
@@ -450,6 +535,14 @@ fn append_tree_rows(
                 });
                 append_tree_rows(children, depth + 1, selected_file_index, file_index, rows);
             }
+            FileTreeNode::Page { name, children, .. } => {
+                rows.push(FileTreeRow {
+                    label: format!("{indent}▾ {}", name.to_string_lossy()),
+                    is_selected: *file_index == selected_file_index,
+                });
+                *file_index += 1;
+                append_tree_rows(children, depth + 1, selected_file_index, file_index, rows);
+            }
             FileTreeNode::File { name, .. } => {
                 rows.push(FileTreeRow {
                     label: format!("{indent}  {}", name.to_string_lossy()),
@@ -463,7 +556,10 @@ fn append_tree_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{file_tree_rows, preview_lines, preview_scroll_offset, two_pane_layout};
+    use super::{
+        file_tree_rows, overlay_cursor_position, preview_lines, preview_scroll_for_block,
+        preview_scroll_offset, two_pane_layout,
+    };
     use crate::markdown::parse;
     use crate::workspace::FileTree;
     use ratatui::{layout::Rect, style::Color};
@@ -511,6 +607,22 @@ mod tests {
     fn clamps_preview_scroll_to_the_terminal_coordinate_range() {
         assert_eq!(preview_scroll_offset(12), 12);
         assert_eq!(preview_scroll_offset(usize::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn offsets_the_preview_for_the_blank_line_before_a_later_block() {
+        let document = parse("first\n\nsecond");
+
+        assert_eq!(preview_scroll_for_block(&document, 0), 0);
+        assert_eq!(preview_scroll_for_block(&document, 1), 2);
+    }
+
+    #[test]
+    fn positions_the_input_cursor_after_wide_characters() {
+        let area = Rect::new(10, 4, 20, 8);
+
+        assert_eq!(overlay_cursor_position(area, "日本"), (17, 5));
+        assert_eq!(overlay_cursor_position(area, &"x".repeat(30)), (29, 5));
     }
 
     #[test]

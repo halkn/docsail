@@ -59,13 +59,15 @@ impl FileTree {
             }
         }
 
-        Ok(Self {
+        let mut tree = Self {
             root: FileTreeNode::Directory {
                 name: display_name(root),
                 path: root.to_path_buf(),
                 children: root_builder.into_nodes(root),
             },
-        })
+        };
+        tree.apply_order_files();
+        Ok(tree)
     }
 
     pub fn root(&self) -> &FileTreeNode {
@@ -79,11 +81,104 @@ impl FileTree {
     pub fn file_at(&self, index: usize) -> Option<&Path> {
         file_at(&self.root, index, &mut 0)
     }
+
+    fn apply_order_files(&mut self) {
+        apply_order_files(&mut self.root);
+    }
+}
+
+fn apply_order_files(node: &mut FileTreeNode) {
+    let (path, children) = match node {
+        FileTreeNode::Directory { path, children, .. } => (path, children),
+        FileTreeNode::Page {
+            children_path,
+            children,
+            ..
+        } => (children_path, children),
+        FileTreeNode::File { .. } => return,
+    };
+    for child in children.iter_mut() {
+        apply_order_files(child);
+    }
+
+    let order = fs::read_to_string(path.join(".order"))
+        .ok()
+        .map(|content| {
+            content
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .enumerate()
+                .map(|(index, name)| (name.to_owned(), index))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    children.sort_by(|left, right| {
+        let rank = |node: &FileTreeNode| {
+            let name = node.name().to_string_lossy();
+            let stem = Path::new(name.as_ref())
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(name.as_ref());
+            order
+                .get(name.as_ref())
+                .or_else(|| order.get(stem))
+                .copied()
+        };
+        rank(left)
+            .unwrap_or(usize::MAX)
+            .cmp(&rank(right).unwrap_or(usize::MAX))
+            .then_with(|| left.name().cmp(right.name()))
+    });
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkTarget {
+    pub path: PathBuf,
+    pub anchor: Option<String>,
+}
+
+pub fn resolve_markdown_link(
+    root: &Path,
+    source: &Path,
+    destination: &str,
+    files: &[PathBuf],
+) -> Option<LinkTarget> {
+    if destination.contains("://") || destination.starts_with("mailto:") {
+        return None;
+    }
+    let (path_part, anchor) = destination
+        .split_once('#')
+        .map_or((destination, None), |(path, anchor)| {
+            (path, (!anchor.is_empty()).then(|| anchor.to_owned()))
+        });
+    let candidate = if path_part.is_empty() {
+        source.to_path_buf()
+    } else {
+        source.parent()?.join(path_part)
+    };
+    let candidates = if candidate.extension().is_some() {
+        vec![candidate]
+    } else {
+        vec![
+            candidate.clone(),
+            candidate.with_extension("md"),
+            candidate.with_extension("markdown"),
+        ]
+    };
+    candidates
+        .into_iter()
+        .find_map(|candidate| {
+            let canonical = fs::canonicalize(&candidate).ok()?;
+            canonical.starts_with(root).then_some(canonical)
+        })
+        .and_then(|path| files.contains(&path).then_some(LinkTarget { path, anchor }))
 }
 
 fn file_count(node: &FileTreeNode) -> usize {
     match node {
         FileTreeNode::Directory { children, .. } => children.iter().map(file_count).sum(),
+        FileTreeNode::Page { children, .. } => 1 + children.iter().map(file_count).sum::<usize>(),
         FileTreeNode::File { .. } => 1,
     }
 }
@@ -93,6 +188,13 @@ fn file_at<'a>(node: &'a FileTreeNode, index: usize, current: &mut usize) -> Opt
         FileTreeNode::Directory { children, .. } => children
             .iter()
             .find_map(|child| file_at(child, index, current)),
+        FileTreeNode::Page { path, children, .. } if *current == index => Some(path),
+        FileTreeNode::Page { children, .. } => {
+            *current += 1;
+            children
+                .iter()
+                .find_map(|child| file_at(child, index, current))
+        }
         FileTreeNode::File { path, .. } if *current == index => Some(path),
         FileTreeNode::File { .. } => {
             *current += 1;
@@ -108,6 +210,12 @@ pub enum FileTreeNode {
         path: PathBuf,
         children: Vec<FileTreeNode>,
     },
+    Page {
+        name: OsString,
+        path: PathBuf,
+        children_path: PathBuf,
+        children: Vec<FileTreeNode>,
+    },
     File {
         name: OsString,
         path: PathBuf,
@@ -117,19 +225,23 @@ pub enum FileTreeNode {
 impl FileTreeNode {
     pub fn name(&self) -> &std::ffi::OsStr {
         match self {
-            Self::Directory { name, .. } | Self::File { name, .. } => name,
+            Self::Directory { name, .. } | Self::Page { name, .. } | Self::File { name, .. } => {
+                name
+            }
         }
     }
 
     pub fn path(&self) -> &Path {
         match self {
-            Self::Directory { path, .. } | Self::File { path, .. } => path,
+            Self::Directory { path, .. } | Self::Page { path, .. } | Self::File { path, .. } => {
+                path
+            }
         }
     }
 
     pub fn children(&self) -> &[FileTreeNode] {
         match self {
-            Self::Directory { children, .. } => children,
+            Self::Directory { children, .. } | Self::Page { children, .. } => children,
             Self::File { .. } => &[],
         }
     }
@@ -184,20 +296,65 @@ impl DirectoryBuilder {
     }
 
     fn into_nodes(self, parent: &Path) -> Vec<FileTreeNode> {
-        self.children
-            .into_iter()
-            .map(|(name, node)| match node {
+        let mut entries = self.children;
+        let names = entries.keys().cloned().collect::<Vec<_>>();
+        let mut nodes = Vec::new();
+        for name in names {
+            let Some(entry) = entries.remove(&name) else {
+                continue;
+            };
+            match entry {
                 TreeBuilderNode::Directory(directory) => {
-                    let path = parent.join(&name);
-                    FileTreeNode::Directory {
-                        name,
-                        children: directory.into_nodes(&path),
-                        path,
+                    let page_file = ["md", "markdown"].into_iter().find_map(|extension| {
+                        let file_name = Path::new(&name)
+                            .with_extension(extension)
+                            .file_name()
+                            .map(OsString::from)?;
+                        matches!(entries.get(&file_name), Some(TreeBuilderNode::File(_)))
+                            .then(|| entries.remove(&file_name))
+                            .flatten()
+                            .and_then(|entry| match entry {
+                                TreeBuilderNode::File(path) => Some(path),
+                                TreeBuilderNode::Directory(_) => None,
+                            })
+                    });
+                    let children_path = parent.join(&name);
+                    if let Some(path) = page_file {
+                        let page_name = path.file_name().unwrap_or(&name).to_os_string();
+                        nodes.push(FileTreeNode::Page {
+                            name: page_name,
+                            path,
+                            children: directory.into_nodes(&children_path),
+                            children_path,
+                        });
+                    } else {
+                        nodes.push(FileTreeNode::Directory {
+                            name,
+                            children: directory.into_nodes(&children_path),
+                            path: children_path,
+                        });
                     }
                 }
-                TreeBuilderNode::File(path) => FileTreeNode::File { name, path },
-            })
-            .collect()
+                TreeBuilderNode::File(path) => {
+                    let stem = Path::new(&name).file_stem().map(OsString::from);
+                    if is_markdown_file(&path)
+                        && let Some(stem) = stem
+                        && let Some(TreeBuilderNode::Directory(directory)) = entries.remove(&stem)
+                    {
+                        let children_path = parent.join(&stem);
+                        nodes.push(FileTreeNode::Page {
+                            name,
+                            path,
+                            children: directory.into_nodes(&children_path),
+                            children_path,
+                        });
+                    } else {
+                        nodes.push(FileTreeNode::File { name, path });
+                    }
+                }
+            }
+        }
+        nodes
     }
 }
 
@@ -344,6 +501,7 @@ fn classify(path: PathBuf) -> Result<WorkspaceTarget, WorkspaceError> {
 mod tests {
     use super::{
         FileTree, FileTreeNode, WorkspaceError, WorkspaceTarget, discover_markdown_files, resolve,
+        resolve_markdown_link,
     };
     use std::{
         fs,
@@ -569,6 +727,32 @@ mod tests {
     }
 
     #[test]
+    fn nests_a_page_directory_under_its_matching_markdown_page() {
+        let directory = TestDirectory::new();
+        let guide_directory = directory.path().join("guide");
+        fs::create_dir(&guide_directory).unwrap();
+        let guide_page = directory.path().join("guide.md");
+        let child_page = guide_directory.join("child.md");
+        fs::write(&guide_page, "# Guide").unwrap();
+        fs::write(&child_page, "# Child").unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let guide_page = fs::canonicalize(guide_page).unwrap();
+        let child_page = fs::canonicalize(child_page).unwrap();
+
+        let tree =
+            FileTree::from_files(&root, vec![guide_page.clone(), child_page.clone()]).unwrap();
+
+        assert!(matches!(
+            tree.root().children(),
+            [FileTreeNode::Page { path, children, .. }]
+                if path == &guide_page
+                    && matches!(children.as_slice(), [FileTreeNode::File { path, .. }] if path == &child_page)
+        ));
+        assert_eq!(tree.file_at(0), Some(guide_page.as_path()));
+        assert_eq!(tree.file_at(1), Some(child_page.as_path()));
+    }
+
+    #[test]
     fn rejects_a_path_that_lexically_escapes_the_tree_root() {
         let directory = TestDirectory::new();
         let root = directory.path().join("workspace");
@@ -578,5 +762,50 @@ mod tests {
         let error = FileTree::from_files(&root, vec![escaped_path.clone()]).unwrap_err();
 
         assert_eq!(error, super::FileTreeError::OutsideRoot(escaped_path));
+    }
+
+    #[test]
+    fn applies_order_files_before_unlisted_entries() {
+        let directory = TestDirectory::new();
+        fs::write(directory.path().join("alpha.md"), "# Alpha").unwrap();
+        fs::write(directory.path().join("beta.md"), "# Beta").unwrap();
+        fs::write(directory.path().join(".order"), "beta\nmissing\n").unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let tree =
+            FileTree::from_files(&root, vec![root.join("alpha.md"), root.join("beta.md")]).unwrap();
+
+        assert_eq!(tree.file_at(0), Some(root.join("beta.md").as_path()));
+        assert_eq!(tree.file_at(1), Some(root.join("alpha.md").as_path()));
+    }
+
+    #[test]
+    fn resolves_relative_markdown_links_and_rejects_external_urls() {
+        let directory = TestDirectory::new();
+        let guide = directory.path().join("guide");
+        fs::create_dir(&guide).unwrap();
+        let source = guide.join("start.md");
+        let target = directory.path().join("README.md");
+        fs::write(&source, "# Start").unwrap();
+        fs::write(&target, "# Read me").unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let source = fs::canonicalize(source).unwrap();
+        let target = fs::canonicalize(target).unwrap();
+
+        assert_eq!(
+            resolve_markdown_link(
+                &root,
+                &source,
+                "../README#read-me",
+                &[source.clone(), target.clone()]
+            ),
+            Some(super::LinkTarget {
+                path: target,
+                anchor: Some("read-me".to_owned())
+            })
+        );
+        assert!(
+            resolve_markdown_link(&root, &source, "https://example.invalid", &[source.clone()])
+                .is_none()
+        );
     }
 }

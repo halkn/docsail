@@ -16,6 +16,180 @@ impl Document {
     pub fn blocks(&self) -> &[Block] {
         &self.blocks
     }
+
+    pub fn headings(&self) -> Vec<Heading> {
+        let mut occurrences = std::collections::BTreeMap::<String, usize>::new();
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(block_index, block)| match block {
+                Block::Heading { level, content } => {
+                    let title = inline_plain_text(content);
+                    let base = heading_slug(&title);
+                    let occurrence = occurrences.entry(base.clone()).or_default();
+                    let id = if *occurrence == 0 {
+                        base
+                    } else {
+                        format!("{base}-{}", *occurrence)
+                    };
+                    *occurrence += 1;
+                    Some(Heading {
+                        level: *level,
+                        title,
+                        id,
+                        block_index,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn search_blocks(&self, query: &str) -> Vec<usize> {
+        let query = query.to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| {
+                block_plain_text(block)
+                    .to_lowercase()
+                    .contains(&query)
+                    .then_some(index)
+            })
+            .collect()
+    }
+
+    pub fn block_text(&self, index: usize) -> Option<String> {
+        self.blocks.get(index).map(block_plain_text)
+    }
+
+    pub fn link_destinations(&self) -> Vec<&str> {
+        let mut destinations = Vec::new();
+        for block in &self.blocks {
+            collect_block_links(block, &mut destinations);
+        }
+        destinations
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Heading {
+    pub level: HeadingLevel,
+    pub title: String,
+    pub id: String,
+    pub block_index: usize,
+}
+
+pub fn heading_slug(title: &str) -> String {
+    let slug = title
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter_map(|character| {
+            if character.is_alphanumeric() || matches!(character, '-' | '_' | '\u{3000}') {
+                Some(if character == '\u{3000}' {
+                    '-'
+                } else {
+                    character
+                })
+            } else if character.is_whitespace() {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect::<String>();
+    slug.trim_matches('-').to_owned()
+}
+
+fn inline_plain_text(inlines: &[Inline]) -> String {
+    inlines.iter().fold(String::new(), |mut text, inline| {
+        match inline {
+            Inline::Text(value)
+            | Inline::Autolink(value)
+            | Inline::Code(value)
+            | Inline::Html(value) => text.push_str(value),
+            Inline::Link { content, .. }
+            | Inline::Image { alt: content, .. }
+            | Inline::Emphasis(content)
+            | Inline::Strong(content)
+            | Inline::Strikethrough(content) => text.push_str(&inline_plain_text(content)),
+            Inline::SoftBreak | Inline::HardBreak => text.push(' '),
+        }
+        text
+    })
+}
+
+fn block_plain_text(block: &Block) -> String {
+    match block {
+        Block::Heading { content, .. } | Block::Paragraph(content) => inline_plain_text(content),
+        Block::List { items, .. } => items
+            .iter()
+            .flat_map(|item| item.blocks.iter())
+            .map(block_plain_text)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Block::BlockQuote(blocks) => blocks
+            .iter()
+            .map(block_plain_text)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Block::CodeBlock { content, .. } | Block::Html(content) => content.clone(),
+        Block::Table { header, rows, .. } => header
+            .iter()
+            .chain(rows.iter().flatten())
+            .map(|cell| inline_plain_text(cell))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Block::ThematicBreak => String::new(),
+    }
+}
+
+fn collect_block_links<'a>(block: &'a Block, destinations: &mut Vec<&'a str>) {
+    match block {
+        Block::Heading { content, .. } | Block::Paragraph(content) => {
+            collect_inline_links(content, destinations)
+        }
+        Block::List { items, .. } => {
+            for item in items {
+                for block in &item.blocks {
+                    collect_block_links(block, destinations);
+                }
+            }
+        }
+        Block::BlockQuote(blocks) => {
+            for block in blocks {
+                collect_block_links(block, destinations);
+            }
+        }
+        Block::Table { header, rows, .. } => {
+            for cell in header.iter().chain(rows.iter().flatten()) {
+                collect_inline_links(cell, destinations);
+            }
+        }
+        Block::CodeBlock { .. } | Block::ThematicBreak | Block::Html(_) => {}
+    }
+}
+
+fn collect_inline_links<'a>(inlines: &'a [Inline], destinations: &mut Vec<&'a str>) {
+    for inline in inlines {
+        match inline {
+            Inline::Link {
+                content,
+                destination,
+            } => {
+                destinations.push(destination);
+                collect_inline_links(content, destinations);
+            }
+            Inline::Image { alt, .. }
+            | Inline::Emphasis(alt)
+            | Inline::Strong(alt)
+            | Inline::Strikethrough(alt) => collect_inline_links(alt, destinations),
+            _ => {}
+        }
+    }
 }
 
 pub fn parse(source: &str) -> Document {
@@ -553,7 +727,9 @@ pub enum Inline {
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, Document, HeadingLevel, Inline, ListItem, TableAlignment, parse};
+    use super::{
+        Block, Document, HeadingLevel, Inline, ListItem, TableAlignment, heading_slug, parse,
+    };
 
     #[test]
     fn parses_headings_and_paragraphs() {
@@ -662,5 +838,22 @@ mod tests {
         assert_eq!(document.blocks().len(), 2);
         assert!(matches!(document.blocks()[0], Block::Heading { .. }));
         assert!(matches!(document.blocks()[1], Block::List { .. }));
+    }
+
+    #[test]
+    fn creates_github_style_heading_ids_and_searches_blocks() {
+        let document = parse("# Hello, World!\n\ntext needle\n\n## Hello, World!");
+
+        assert_eq!(heading_slug("日本語 Heading"), "日本語-heading");
+        assert_eq!(
+            document
+                .headings()
+                .into_iter()
+                .map(|heading| heading.id)
+                .collect::<Vec<_>>(),
+            ["hello-world", "hello-world-1"]
+        );
+        assert_eq!(document.search_blocks("NEEDLE"), [1]);
+        assert_eq!(document.block_text(1).as_deref(), Some("text needle"));
     }
 }
