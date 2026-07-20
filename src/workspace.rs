@@ -804,8 +804,13 @@ mod tests {
             })
         );
         assert!(
-            resolve_markdown_link(&root, &source, "https://example.invalid", &[source.clone()])
-                .is_none()
+            resolve_markdown_link(
+                &root,
+                &source,
+                "https://example.invalid",
+                std::slice::from_ref(&source),
+            )
+            .is_none()
         );
     }
 }
