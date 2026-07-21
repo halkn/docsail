@@ -223,6 +223,10 @@ pub enum FileTreeNode {
 }
 
 impl FileTreeNode {
+    pub fn file_count(&self) -> usize {
+        file_count(self)
+    }
+
     pub fn name(&self) -> &std::ffi::OsStr {
         match self {
             Self::Directory { name, .. } | Self::Page { name, .. } | Self::File { name, .. } => {

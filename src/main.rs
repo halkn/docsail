@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env,
     ffi::OsString,
     fs, io,
@@ -77,6 +78,13 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = terminal::TerminalSession::enter()?;
     let mut app = app::App::new();
     app.set_file_count(tree.file_count());
+    let mut collapsed_paths = HashSet::new();
+    app.set_tree_rows(
+        ui::file_tree_rows(&tree, &collapsed_paths)
+            .iter()
+            .map(|row| row.file_index)
+            .collect(),
+    );
     let mut event_source = event::CrosstermEventSource;
     let mut back_history = Vec::<Location>::new();
     let mut forward_history = Vec::<Location>::new();
@@ -90,6 +98,27 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
         {
             tree = refreshed_tree;
             app.set_file_count(tree.file_count());
+            app.set_tree_rows(
+                ui::file_tree_rows(&tree, &collapsed_paths)
+                    .iter()
+                    .map(|row| row.file_index)
+                    .collect(),
+            );
+        }
+        let mut tree_rows = ui::file_tree_rows(&tree, &collapsed_paths);
+        if app.take_tree_toggle_request()
+            && let Some(row) = tree_rows.get(app.tree_cursor())
+            && row.is_collapsible
+        {
+            let selected_path = row.path.clone();
+            if !collapsed_paths.insert(selected_path.clone()) {
+                collapsed_paths.remove(&selected_path);
+            }
+            tree_rows = ui::file_tree_rows(&tree, &collapsed_paths);
+            app.set_tree_rows(tree_rows.iter().map(|row| row.file_index).collect());
+            if let Some(cursor) = tree_rows.iter().position(|row| row.path == selected_path) {
+                app.set_tree_cursor(cursor);
+            }
         }
         if app.take_back_request()
             && let Some(location) = back_history.pop()
@@ -202,7 +231,8 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
                     frame,
                     &tree,
                     ui::RenderState {
-                        selected_file_index: app.selected_file_index(),
+                        tree_cursor: app.tree_cursor(),
+                        collapsed_paths: &collapsed_paths,
                         focus: app.focus(),
                         preview_scroll: app.preview_scroll(),
                         document: &document,
