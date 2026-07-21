@@ -38,6 +38,7 @@ pub enum AppEvent {
     DeleteForward,
     KillToEnd,
     KillToStart,
+    ToggleTreeNode,
     Escape,
 }
 
@@ -47,6 +48,8 @@ pub struct App {
     is_running: bool,
     selected_file_index: usize,
     file_count: usize,
+    tree_cursor: usize,
+    tree_rows: Vec<Option<usize>>,
     preview_scroll: usize,
     activation_requested: bool,
     reload_requested: bool,
@@ -60,6 +63,7 @@ pub struct App {
     overlay_submission: Option<Overlay>,
     next_page_match_requested: bool,
     previous_page_match_requested: bool,
+    tree_toggle_requested: bool,
 }
 
 impl Default for App {
@@ -69,6 +73,8 @@ impl Default for App {
             is_running: false,
             selected_file_index: 0,
             file_count: usize::MAX,
+            tree_cursor: 0,
+            tree_rows: Vec::new(),
             preview_scroll: 0,
             activation_requested: false,
             reload_requested: false,
@@ -82,6 +88,7 @@ impl Default for App {
             overlay_submission: None,
             next_page_match_requested: false,
             previous_page_match_requested: false,
+            tree_toggle_requested: false,
         }
     }
 }
@@ -102,6 +109,12 @@ impl App {
     pub fn selected_file_index(&self) -> usize {
         self.selected_file_index
     }
+    pub fn tree_cursor(&self) -> usize {
+        self.tree_cursor
+    }
+    pub fn set_tree_cursor(&mut self, cursor: usize) {
+        self.tree_cursor = cursor.min(self.tree_rows.len().saturating_sub(1));
+    }
     pub fn preview_scroll(&self) -> usize {
         self.preview_scroll
     }
@@ -121,12 +134,25 @@ impl App {
         self.file_count = file_count;
         self.selected_file_index = self.selected_file_index.min(file_count.saturating_sub(1));
     }
+    pub fn set_tree_rows(&mut self, rows: Vec<Option<usize>>) {
+        self.tree_rows = rows;
+        self.tree_cursor = self
+            .tree_rows
+            .iter()
+            .position(|file_index| *file_index == Some(self.selected_file_index))
+            .unwrap_or_else(|| self.tree_cursor.min(self.tree_rows.len().saturating_sub(1)));
+    }
     pub fn set_result_count(&mut self, count: usize) {
         self.result_count = count;
         self.selected_result = self.selected_result.min(count.saturating_sub(1));
     }
     pub fn navigate_to(&mut self, file_index: usize, scroll: usize) {
         self.selected_file_index = file_index.min(self.file_count.saturating_sub(1));
+        self.tree_cursor = self
+            .tree_rows
+            .iter()
+            .position(|tree_file_index| *tree_file_index == Some(self.selected_file_index))
+            .unwrap_or(self.tree_cursor);
         self.preview_scroll = scroll;
         self.focus = Focus::Preview;
     }
@@ -151,6 +177,9 @@ impl App {
     pub fn take_previous_page_match_request(&mut self) -> bool {
         std::mem::take(&mut self.previous_page_match_requested)
     }
+    pub fn take_tree_toggle_request(&mut self) -> bool {
+        std::mem::take(&mut self.tree_toggle_requested)
+    }
 
     pub fn update(&mut self, event: AppEvent) {
         if self.overlay.is_some() {
@@ -160,7 +189,7 @@ impl App {
         match event {
             AppEvent::MoveDown => self.move_down(),
             AppEvent::MoveUp => self.move_up(),
-            AppEvent::Activate => self.activation_requested = true,
+            AppEvent::Activate => self.activate_tree_item(),
             AppEvent::ToggleFocus => self.toggle_focus(),
             AppEvent::Reload => self.reload_requested = true,
             AppEvent::Quit => self.is_running = false,
@@ -179,6 +208,9 @@ impl App {
             AppEvent::Input('/') => self.open_overlay(Overlay::PageSearch),
             AppEvent::Input('n') => self.next_page_match_requested = true,
             AppEvent::Input('N') => self.previous_page_match_requested = true,
+            AppEvent::Input(' ') | AppEvent::ToggleTreeNode if self.focus == Focus::FileTree => {
+                self.tree_toggle_requested = true;
+            }
             _ => {}
         }
     }
@@ -251,30 +283,13 @@ impl App {
     }
     fn move_down(&mut self) {
         match self.focus {
-            Focus::FileTree => {
-                let previous = self.selected_file_index;
-                if self.file_count > 0 {
-                    self.selected_file_index = self
-                        .selected_file_index
-                        .saturating_add(1)
-                        .min(self.file_count.saturating_sub(1));
-                }
-                if self.selected_file_index != previous {
-                    self.preview_scroll = 0;
-                }
-            }
+            Focus::FileTree => self.move_tree_cursor(1),
             Focus::Preview => self.preview_scroll = self.preview_scroll.saturating_add(1),
         }
     }
     fn move_up(&mut self) {
         match self.focus {
-            Focus::FileTree => {
-                let previous = self.selected_file_index;
-                self.selected_file_index = self.selected_file_index.saturating_sub(1);
-                if self.selected_file_index != previous {
-                    self.preview_scroll = 0;
-                }
-            }
+            Focus::FileTree => self.move_tree_cursor(-1),
             Focus::Preview => self.preview_scroll = self.preview_scroll.saturating_sub(1),
         }
     }
@@ -283,6 +298,46 @@ impl App {
             Focus::FileTree => Focus::Preview,
             Focus::Preview => Focus::FileTree,
         };
+    }
+    fn activate_tree_item(&mut self) {
+        if self.focus == Focus::FileTree && self.tree_rows.get(self.tree_cursor) == Some(&None) {
+            self.tree_toggle_requested = true;
+        } else {
+            self.activation_requested = true;
+        }
+    }
+    fn move_tree_cursor(&mut self, offset: isize) {
+        let previous_file_index = self.selected_file_index;
+        if self.tree_rows.is_empty() {
+            self.selected_file_index = if offset.is_negative() {
+                self.selected_file_index
+                    .saturating_sub(offset.unsigned_abs())
+            } else {
+                self.selected_file_index
+                    .saturating_add(offset as usize)
+                    .min(self.file_count.saturating_sub(1))
+            };
+            if self.selected_file_index != previous_file_index {
+                self.preview_scroll = 0;
+            }
+            return;
+        }
+        let max = self.tree_rows.len().saturating_sub(1);
+        self.tree_cursor = if offset.is_negative() {
+            self.tree_cursor.saturating_sub(offset.unsigned_abs())
+        } else {
+            self.tree_cursor.saturating_add(offset as usize).min(max)
+        };
+        if let Some(file_index) = self
+            .tree_rows
+            .get(self.tree_cursor)
+            .and_then(|index| *index)
+        {
+            self.selected_file_index = file_index;
+        }
+        if self.selected_file_index != previous_file_index {
+            self.preview_scroll = 0;
+        }
     }
 }
 
@@ -311,6 +366,19 @@ mod tests {
         assert_eq!(app.selected_file_index(), 2);
         assert_eq!(app.preview_scroll(), 8);
         assert_eq!(app.focus(), Focus::Preview);
+    }
+    #[test]
+    fn navigates_tree_rows_without_changing_the_preview_on_a_directory() {
+        let mut app = App::new();
+        app.set_file_count(2);
+        app.set_tree_rows(vec![Some(0), None, Some(1)]);
+
+        app.update(AppEvent::MoveDown);
+
+        assert_eq!(app.tree_cursor(), 1);
+        assert_eq!(app.selected_file_index(), 0);
+        app.update(AppEvent::Activate);
+        assert!(app.take_tree_toggle_request());
     }
     #[test]
     fn accepts_a_search_query_and_submits_its_selected_result() {
