@@ -10,7 +10,7 @@
 
 - 相対 Markdown リンクと見出しアンカー
 - Back / Forward と TOC overlay
-- Azure DevOps Wiki の `.order` と基本構文
+- Azure DevOps Wiki の `.order` によるページ順序
 - ファイル名ファジー検索とページ内検索
 
 ## v0.3.0 — Mermaid
