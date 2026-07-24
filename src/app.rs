@@ -64,6 +64,7 @@ pub struct App {
     next_page_match_requested: bool,
     previous_page_match_requested: bool,
     tree_toggle_requested: bool,
+    diagram_toggle_requested: bool,
 }
 
 impl Default for App {
@@ -89,6 +90,7 @@ impl Default for App {
             next_page_match_requested: false,
             previous_page_match_requested: false,
             tree_toggle_requested: false,
+            diagram_toggle_requested: false,
         }
     }
 }
@@ -180,6 +182,9 @@ impl App {
     pub fn take_tree_toggle_request(&mut self) -> bool {
         std::mem::take(&mut self.tree_toggle_requested)
     }
+    pub fn take_diagram_toggle_request(&mut self) -> bool {
+        std::mem::take(&mut self.diagram_toggle_requested)
+    }
 
     pub fn update(&mut self, event: AppEvent) {
         if self.overlay.is_some() {
@@ -208,6 +213,7 @@ impl App {
             AppEvent::Input('/') => self.open_overlay(Overlay::PageSearch),
             AppEvent::Input('n') => self.next_page_match_requested = true,
             AppEvent::Input('N') => self.previous_page_match_requested = true,
+            AppEvent::Input('m') => self.diagram_toggle_requested = true,
             AppEvent::Input(' ') | AppEvent::ToggleTreeNode if self.focus == Focus::FileTree => {
                 self.tree_toggle_requested = true;
             }
@@ -398,6 +404,14 @@ mod tests {
         app.update(AppEvent::Forward);
         assert!(app.take_back_request());
         assert!(app.take_forward_request());
+    }
+
+    #[test]
+    fn records_a_mermaid_display_toggle_request() {
+        let mut app = App::new();
+        app.update(AppEvent::Input('m'));
+        assert!(app.take_diagram_toggle_request());
+        assert!(!app.take_diagram_toggle_request());
     }
 
     #[test]

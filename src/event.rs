@@ -117,6 +117,7 @@ mod tests {
             (KeyCode::Char('t'), AppEvent::Input('t')),
             (KeyCode::Char('f'), AppEvent::Input('f')),
             (KeyCode::Char('/'), AppEvent::Input('/')),
+            (KeyCode::Char('m'), AppEvent::Input('m')),
         ];
 
         for (key_code, expected_event) in cases {
