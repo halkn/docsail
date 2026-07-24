@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{Focus, Overlay},
+    diagram::{self, DISPLAY_HEIGHT},
     markdown::{Block as MarkdownBlock, Document, HeadingLevel, Inline, TableAlignment},
     workspace::{FileTree, FileTreeNode},
 };
@@ -39,6 +40,8 @@ pub struct RenderState<'a> {
     pub query_cursor: usize,
     pub overlay_results: &'a [String],
     pub selected_result: usize,
+    pub rendered_diagrams: &'a HashSet<usize>,
+    pub diagrams: &'a [(usize, &'a ratatui_image::sliced::SlicedProtocol)],
 }
 
 pub fn render(frame: &mut Frame<'_>, tree: &FileTree, state: RenderState<'_>) {
@@ -57,6 +60,8 @@ pub fn render(frame: &mut Frame<'_>, tree: &FileTree, state: RenderState<'_>) {
         state.preview_scroll,
         state.focus == Focus::Preview,
         state.document,
+        state.rendered_diagrams,
+        state.diagrams,
     );
     if let Some(overlay) = state.overlay {
         render_overlay(
@@ -71,11 +76,27 @@ pub fn render(frame: &mut Frame<'_>, tree: &FileTree, state: RenderState<'_>) {
 }
 
 pub fn preview_scroll_for_block(document: &Document, block_index: usize) -> usize {
+    preview_scroll_for_block_with_diagrams(document, block_index, &HashSet::new())
+}
+
+pub fn preview_scroll_for_block_with_diagrams(
+    document: &Document,
+    block_index: usize,
+    rendered_diagrams: &HashSet<usize>,
+) -> usize {
     document
         .blocks()
         .iter()
         .take(block_index)
-        .map(|block| block_lines(block).len() + 1)
+        .enumerate()
+        .map(|(index, block)| {
+            let line_count = if rendered_diagrams.contains(&index) {
+                usize::from(DISPLAY_HEIGHT)
+            } else {
+                block_lines(block).len()
+            };
+            line_count + 1
+        })
         .sum()
 }
 
@@ -146,8 +167,10 @@ fn render_preview(
     preview_scroll: usize,
     is_focused: bool,
     document: &Document,
+    rendered_diagrams: &HashSet<usize>,
+    diagrams: &[(usize, &ratatui_image::sliced::SlicedProtocol)],
 ) {
-    let lines = preview_lines(document);
+    let lines = preview_lines_with_diagrams(document, rendered_diagrams);
     frame.render_widget(
         Paragraph::new(lines)
             .scroll((preview_scroll_offset(preview_scroll), 0))
@@ -155,9 +178,35 @@ fn render_preview(
             .block(pane_block("Preview", is_focused)),
         area,
     );
+    for (block_index, protocol) in diagrams {
+        let offset = preview_line_offset(document, *block_index, rendered_diagrams);
+        let content_height = usize::from(area.height.saturating_sub(2));
+        let is_visible = offset.saturating_add(usize::from(DISPLAY_HEIGHT)) > preview_scroll
+            && offset < preview_scroll.saturating_add(content_height);
+        if is_visible {
+            let y = i16::try_from(offset)
+                .unwrap_or(i16::MAX)
+                .saturating_sub(i16::try_from(preview_scroll).unwrap_or(i16::MAX));
+            let content_area = Rect::new(
+                area.x.saturating_add(1),
+                area.y.saturating_add(1),
+                area.width.saturating_sub(2),
+                area.height.saturating_sub(2),
+            );
+            frame.render_widget(diagram::image_widget(protocol, y), content_area);
+        }
+    }
 }
 
+#[cfg(test)]
 fn preview_lines(document: &Document) -> Vec<Line<'static>> {
+    preview_lines_with_diagrams(document, &HashSet::new())
+}
+
+fn preview_lines_with_diagrams(
+    document: &Document,
+    rendered_diagrams: &HashSet<usize>,
+) -> Vec<Line<'static>> {
     document
         .blocks()
         .iter()
@@ -167,10 +216,35 @@ fn preview_lines(document: &Document) -> Vec<Line<'static>> {
             if index > 0 {
                 lines.push(Line::default());
             }
-            lines.extend(block_lines(block));
+            if rendered_diagrams.contains(&index) {
+                lines.extend((0..DISPLAY_HEIGHT).map(|_| Line::default()));
+            } else {
+                lines.extend(block_lines(block));
+            }
             lines
         })
         .collect()
+}
+
+fn preview_line_offset(
+    document: &Document,
+    block_index: usize,
+    rendered_diagrams: &HashSet<usize>,
+) -> usize {
+    document
+        .blocks()
+        .iter()
+        .take(block_index)
+        .enumerate()
+        .map(|(index, block)| {
+            let lines = if rendered_diagrams.contains(&index) {
+                usize::from(DISPLAY_HEIGHT)
+            } else {
+                block_lines(block).len()
+            };
+            lines + 1
+        })
+        .sum()
 }
 
 fn block_lines(block: &MarkdownBlock) -> Vec<Line<'static>> {
@@ -600,8 +674,10 @@ fn file_tree_scroll(tree_cursor: usize, viewport_height: u16) -> u16 {
 mod tests {
     use super::{
         file_tree_rows, file_tree_scroll, overlay_cursor_position, preview_lines,
-        preview_scroll_for_block, preview_scroll_offset, two_pane_layout,
+        preview_scroll_for_block, preview_scroll_for_block_with_diagrams, preview_scroll_offset,
+        two_pane_layout,
     };
+    use crate::diagram::DISPLAY_HEIGHT;
     use crate::markdown::parse;
     use crate::workspace::FileTree;
     use ratatui::{layout::Rect, style::Color};
@@ -718,6 +794,17 @@ mod tests {
 
         assert_eq!(preview_scroll_for_block(&document, 0), 0);
         assert_eq!(preview_scroll_for_block(&document, 1), 2);
+    }
+
+    #[test]
+    fn offsets_blocks_after_rendered_diagrams_using_the_reserved_height() {
+        let document = parse("before\n\n```mermaid\nflowchart TD\nA --> B\n```\n\nafter");
+        let rendered_diagrams = HashSet::from([1]);
+
+        assert_eq!(
+            preview_scroll_for_block_with_diagrams(&document, 2, &rendered_diagrams),
+            1 + 1 + usize::from(DISPLAY_HEIGHT) + 1
+        );
     }
 
     #[test]

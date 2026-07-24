@@ -8,6 +8,7 @@ use std::{
 };
 
 pub mod app;
+pub mod diagram;
 pub mod event;
 pub mod markdown;
 pub mod terminal;
@@ -76,6 +77,10 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     let markdown_files = workspace::discover_markdown_files(&workspace)?;
     let mut tree = workspace::FileTree::from_files(&workspace.tree_root(), markdown_files)?;
     let mut terminal = terminal::TerminalSession::enter()?;
+    let picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+    let mut diagram_cache = diagram::DiagramCache::new(picker);
+    let mut diagram_mode = diagram::DisplayMode::default();
     let mut app = app::App::new();
     app.set_file_count(tree.file_count());
     let mut collapsed_paths = HashSet::new();
@@ -134,6 +139,14 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let mut document = selected_document(&tree, app.selected_file_index())?;
+        if app.take_diagram_toggle_request() {
+            diagram_mode = match diagram_mode {
+                diagram::DisplayMode::Rendered => diagram::DisplayMode::Source,
+                diagram::DisplayMode::Source => diagram::DisplayMode::Rendered,
+            };
+        }
+        let graphics_enabled = !cfg!(windows) && diagram_cache.supports_graphics();
+        let mut layout_diagrams = diagram_layout_indices(&document, diagram_mode, graphics_enabled);
         if let Some(overlay) = app.take_overlay_submission() {
             match overlay {
                 app::Overlay::Toc => {
@@ -143,7 +156,11 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
                             &mut back_history,
                             &mut forward_history,
                             app.selected_file_index(),
-                            ui::preview_scroll_for_block(&document, heading.block_index),
+                            ui::preview_scroll_for_block_with_diagrams(
+                                &document,
+                                heading.block_index,
+                                &layout_diagrams,
+                            ),
                         );
                     }
                 }
@@ -167,12 +184,17 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
                             &mut back_history,
                             &mut forward_history,
                             app.selected_file_index(),
-                            ui::preview_scroll_for_block(&document, block),
+                            ui::preview_scroll_for_block_with_diagrams(
+                                &document,
+                                block,
+                                &layout_diagrams,
+                            ),
                         );
                     }
                 }
             }
             document = selected_document(&tree, app.selected_file_index())?;
+            layout_diagrams = diagram_layout_indices(&document, diagram_mode, graphics_enabled);
         }
         let next_page_match_requested = app.take_next_page_match_request();
         let previous_page_match_requested = app.take_previous_page_match_request();
@@ -182,6 +204,7 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
                 &last_page_query,
                 app.preview_scroll(),
                 previous_page_match_requested,
+                &layout_diagrams,
             )
         {
             visit(
@@ -189,7 +212,7 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
                 &mut back_history,
                 &mut forward_history,
                 app.selected_file_index(),
-                ui::preview_scroll_for_block(&document, block),
+                ui::preview_scroll_for_block_with_diagrams(&document, block, &layout_diagrams),
             );
         }
         let files = tree_files(&tree);
@@ -212,18 +235,53 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|source| markdown::parse(&source))
                 .unwrap_or_default();
             let headings = target_document.headings();
+            let target_diagrams =
+                diagram_layout_indices(&target_document, diagram_mode, graphics_enabled);
             let scroll = target
                 .anchor
                 .as_ref()
                 .and_then(|anchor| headings.iter().find(|heading| &heading.id == anchor))
                 .map_or(0, |heading| {
-                    ui::preview_scroll_for_block(&target_document, heading.block_index)
+                    ui::preview_scroll_for_block_with_diagrams(
+                        &target_document,
+                        heading.block_index,
+                        &target_diagrams,
+                    )
                 });
             visit(app, &mut back_history, &mut forward_history, index, scroll);
             document = target_document;
+            layout_diagrams = target_diagrams;
         }
         let overlay_results = overlay_results(&tree, &document, app.overlay(), app.query());
         app.set_result_count(overlay_results.len());
+        let terminal_width = terminal.terminal_mut().size()?.width;
+        let diagram_width = terminal_width
+            .saturating_mul(65)
+            .saturating_div(100)
+            .saturating_sub(2)
+            .max(1);
+        let diagram_sources = diagram::rendered_blocks(&document, diagram_mode)
+            .filter(|(index, _)| layout_diagrams.contains(index))
+            .collect::<Vec<_>>();
+        for (_, source) in &diagram_sources {
+            diagram_cache.request(source, diagram_width, diagram::DISPLAY_HEIGHT);
+        }
+        layout_diagrams.retain(|index| {
+            matches!(
+                document.blocks().get(*index),
+                Some(markdown::Block::CodeBlock { content, .. })
+                    if !diagram_cache.is_failed(content, diagram_width, diagram::DISPLAY_HEIGHT)
+            )
+        });
+        let diagrams = diagram_sources
+            .iter()
+            .filter(|(index, _)| layout_diagrams.contains(index))
+            .filter_map(|(index, source)| {
+                diagram_cache
+                    .protocol(source, diagram_width, diagram::DISPLAY_HEIGHT)
+                    .map(|protocol| (*index, protocol))
+            })
+            .collect::<Vec<_>>();
         terminal
             .terminal_mut()
             .draw(|frame| {
@@ -241,6 +299,8 @@ fn run(path: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
                         query_cursor: app.query_cursor(),
                         overlay_results: &overlay_results,
                         selected_result: app.selected_result(),
+                        rendered_diagrams: &layout_diagrams,
+                        diagrams: &diagrams,
                     },
                 )
             })
@@ -379,22 +439,43 @@ fn next_page_match(
     query: &str,
     current_scroll: usize,
     previous: bool,
+    rendered_diagrams: &HashSet<usize>,
 ) -> Option<usize> {
     let matches = document.search_blocks(query);
     if previous {
         matches
             .iter()
             .rev()
-            .find(|&&block| ui::preview_scroll_for_block(document, block) < current_scroll)
+            .find(|&&block| {
+                ui::preview_scroll_for_block_with_diagrams(document, block, rendered_diagrams)
+                    < current_scroll
+            })
             .copied()
             .or_else(|| matches.last().copied())
     } else {
         matches
             .iter()
-            .find(|&&block| ui::preview_scroll_for_block(document, block) > current_scroll)
+            .find(|&&block| {
+                ui::preview_scroll_for_block_with_diagrams(document, block, rendered_diagrams)
+                    > current_scroll
+            })
             .copied()
             .or_else(|| matches.first().copied())
     }
+}
+
+fn diagram_layout_indices(
+    document: &markdown::Document,
+    mode: diagram::DisplayMode,
+    graphics_enabled: bool,
+) -> HashSet<usize> {
+    if !graphics_enabled || mode == diagram::DisplayMode::Source {
+        return HashSet::new();
+    }
+    diagram::rendered_blocks(document, mode)
+        .filter(|(_, source)| diagram::is_supported_source(source))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 fn selected_document(
@@ -415,7 +496,7 @@ fn selected_document(
 mod tests {
     use super::{Command, fuzzy_score, next_page_match, parse_command, search_result_label};
     use crate::markdown::parse;
-    use std::{ffi::OsString, path::PathBuf};
+    use std::{collections::HashSet, ffi::OsString, path::PathBuf};
 
     fn arguments(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -459,8 +540,14 @@ mod tests {
     fn cycles_page_search_matches() {
         let document = parse("one needle\n\nsecond needle");
 
-        assert_eq!(next_page_match(&document, "needle", 0, false), Some(1));
-        assert_eq!(next_page_match(&document, "needle", 1, true), Some(0));
+        assert_eq!(
+            next_page_match(&document, "needle", 0, false, &HashSet::new()),
+            Some(1)
+        );
+        assert_eq!(
+            next_page_match(&document, "needle", 1, true, &HashSet::new()),
+            Some(0)
+        );
         assert_eq!(fuzzy_score("guide/setup.md", "gs"), Some(5));
     }
 

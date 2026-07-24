@@ -56,6 +56,34 @@ fn main() {
 }
 ```
 
+## Mermaid
+
+`m` で描画表示とソース表示を切り替えます。flowchart と sequenceDiagram は描画対象です。
+
+```mermaid
+flowchart TD
+    A[Markdown を開く] --> B{確認する}
+    B -->|図あり| C[Mermaid を描画]
+    B -->|図なし| D[本文を読む]
+    C --> E[完了]
+    D --> E
+```
+
+```mermaid
+sequenceDiagram
+    participant U as 利用者
+    participant D as DocSail
+    U->>D: Markdown を開く
+    D-->>U: Mermaid を表示する
+```
+
+次の図種は v0.3 の品質保証対象外のため、Mermaid ソースとして表示されます。
+
+```mermaid
+classDiagram
+    Document <|-- MarkdownDocument
+```
+
 ## 表
 
 | 左揃え | 中央揃え | 右揃え |

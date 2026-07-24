@@ -34,6 +34,15 @@ HTML は描画せず、リテラルとして表示する。見出しは Terminal
 
 外部 URL の起動、broken link 診断、Azure DevOps Wiki のアラート・タグ等の表示構文は対象外とする。
 
+## v0.3.0 に含めるもの
+
+- `mermaid` fenced block のうち flowchart と sequenceDiagram を Terminal 内へ描画する
+- `m` による現在文書の rendered / source 表示切替
+- 接続先が透過する画像 protocol の検出と Mermaid ソース fallback
+- 文書更新・Terminal resize 時の再 raster と、32 MiB のセッション内 LRU キャッシュ
+
+Mermaid の構文エラー、未対応図種、端末または multiplexer が画像 protocol を透過しない場合は Mermaid ソースを表示する。macOS の Ghostty 上で Herdr を使う場合は Herdr の `experimental.kitty_graphics = true` が必要である。Windows の Herdr における Kitty graphics は Herdr 側で未検証のため、v0.3.0 では Mermaid ソースを表示する。ディスクキャッシュと他図種の品質保証は v0.4.0 以降の対象とする。
+
 ## v0.1.0 から除外するもの
 
 - Mermaid 図形描画、Terminal 画像表示、外部 SVG/PNG 変換
